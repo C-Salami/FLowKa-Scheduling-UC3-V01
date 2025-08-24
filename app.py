@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import tempfile
 from datetime import timedelta
 import pytz
 from dateutil import parser as dtp
@@ -9,16 +8,22 @@ from dateutil import parser as dtp
 import streamlit as st
 import pandas as pd
 import altair as alt
-from st_audiorec import st_audiorec  # <— mic recorder component
+
+# Mic recorder (browser) -> returns WAV bytes
+# pip install streamlit-audiorec
+from st_audiorec import st_audiorec  # UI mic button + recording widget
+
 
 # ============================ PAGE & SECRETS ============================
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
 
-# Pull OPENAI key from Streamlit secrets if available (TOML: OPENAI_API_KEY = "sk-...")
-try:
-    os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
-except Exception:
-    pass  # fine; we'll fall back to regex if no key
+# Pull keys from Streamlit secrets if present
+for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
+    try:
+        os.environ[k] = os.environ.get(k) or st.secrets[k]
+    except Exception:
+        pass  # fine
+
 
 # ============================ DATA LOADING =============================
 @st.cache_data
@@ -45,6 +50,9 @@ if "filt_machines" not in st.session_state:
     st.session_state.filt_machines = sorted(base_schedule["machine"].unique().tolist())
 if "cmd_log" not in st.session_state:
     st.session_state.cmd_log = []  # rolling debug log
+if "last_rec_fingerprint" not in st.session_state:
+    st.session_state.last_rec_fingerprint = None  # to auto-run once per new recording
+
 
 # ============================ CSS / LAYOUT =============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
@@ -136,93 +144,6 @@ max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
-# ============================ HELPERS (UC2 V3) =========================
-def _transcribe_audio_bytes(audio_bytes: bytes, ext: str = "wav") -> str:
-    """
-    Takes raw audio bytes (e.g., from st_audiorec), writes to a temp file,
-    and transcribes via OpenAI.
-    """
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY not set")
-    from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-    try:
-        # Prefer modern transcribe models; fallback to whisper-1
-        try_models = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
-        last_err = None
-        for m in try_models:
-            try:
-                with open(tmp_path, "rb") as f:
-                    resp = client.audio.transcriptions.create(model=m, file=f)
-                return (getattr(resp, "text", None) or resp.get("text") or "").strip()
-            except Exception as e:
-                last_err = e
-        raise last_err or RuntimeError("Transcription failed")
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-def _process_command(cmd_text: str, *, source_hint: str = None):
-    """
-    Shared path to extract/validate/apply any command text (typed or transcribed).
-    """
-    from copy import deepcopy
-    try:
-        payload = extract_intent(cmd_text)
-        ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
-
-        # log it (json-safe)
-        log_payload = deepcopy(payload)
-        if "_target_dt" in log_payload:
-            log_payload["_target_dt"] = str(log_payload["_target_dt"])
-        st.session_state.cmd_log.append({
-            "raw": cmd_text,
-            "payload": log_payload,
-            "ok": bool(ok),
-            "msg": msg,
-            "source": source_hint or payload.get("_source", "?")
-        })
-        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
-
-        if not ok:
-            st.error(f"❌ Cannot apply: {msg}")
-            return
-
-        if payload["intent"] == "delay_order":
-            st.session_state.schedule_df = apply_delay(
-                st.session_state.schedule_df,
-                payload["order_id"],
-                days=payload.get("days", 0),
-                hours=payload.get("hours", 0),
-                minutes=payload.get("minutes", 0),
-            )
-            st.success(f"✅ Delayed {payload['order_id']}.")
-
-        elif payload["intent"] == "move_order":
-            st.session_state.schedule_df = apply_move(
-                st.session_state.schedule_df,
-                payload["order_id"],
-                payload["_target_dt"],
-            )
-            st.success(f"✅ Moved {payload['order_id']}.")
-
-        elif payload["intent"] == "swap_orders":
-            st.session_state.schedule_df = apply_swap(
-                st.session_state.schedule_df,
-                payload["order_id"],
-                payload["order_id_2"],
-            )
-            st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']}.")
-
-        st.rerun()
-    except Exception as e:
-        st.error(f"⚠️ Error: {e}")
 
 # ============================ NLP / INTELLIGENCE (INLINE) =========================
 INTENT_SCHEMA = {  # kept for reference; used if you enable OpenAI path
@@ -283,8 +204,12 @@ def _parse_duration_chunks(text: str):
         else: d["minutes"] += n
     return d
 
+
+# ---------- Extraction via OpenAI (unchanged path for text -> OpenAI) ----------
 def _extract_with_openai(user_text: str):
     from openai import OpenAI
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY not set")
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     SYSTEM = (
         "You normalize factory scheduling edit commands for a Gantt. "
@@ -310,26 +235,24 @@ def _extract_with_openai(user_text: str):
             {"role": "user", "content": USER_GUIDE},
             {"role": "user", "content": user_text},
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {"name": "Edit", "schema": INTENT_SCHEMA}
-        },
+        response_format={"type": "json_schema", "json_schema": {"name": "Edit", "schema": INTENT_SCHEMA}},
     )
     text = resp.output[0].content[0].text
     data = json.loads(text)
     data["_source"] = "openai"
     return data
 
+
 def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    # --- SWAP: "swap O023 O053" | "swap O023 with O053" | "swap O023 & O053"
+    # SWAP: "swap O023 O053" | "swap O023 with O053" | "swap O023 & O053"
     m = re.search(r"(?:^|\b)(swap|switch)\s+(o\d{3})\s*(?:with|and|&)?\s*(o\d{3})\b", low)
     if m:
         return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(3).upper(), "_source": "regex"}
 
-    # --- DELAY synonyms: delay/push/postpone (positive), advance/bring forward/pull in (negative)
+    # DELAY synonyms: delay/push/postpone (positive), advance/bring forward/pull in (negative)
     delay_sign = +1
     if re.search(r"\b(advance|bring\s+forward|pull\s+in)\b", low):
         delay_sign = -1
@@ -337,7 +260,7 @@ def _regex_fallback(user_text: str):
     else:
         low_norm = low
 
-    # Try patterns with explicit "by <duration>"
+    # with explicit "by <duration>"
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\bby\b\s+(.+)$", low_norm)
     if m:
         oid = m.group(2).upper()
@@ -353,7 +276,7 @@ def _regex_fallback(user_text: str):
                 "_source": "regex",
             }
 
-    # Try patterns without "by", e.g. "delay O076 two days"
+    # without "by", e.g. "delay O076 two days"
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
     if m:
         oid = m.group(2).upper()
@@ -368,7 +291,7 @@ def _regex_fallback(user_text: str):
                 "_source": "regex",
             }
 
-    # --- MOVE: "move Oxxx to/on <datetime>"
+    # MOVE: "move Oxxx to/on <datetime>"
     m = re.search(r"(move|set|schedule)\s+(o\d{3})\s+(to|on)\s+(.+)", low)
     if m:
         oid = m.group(2).upper()
@@ -385,12 +308,13 @@ def _regex_fallback(user_text: str):
         except Exception:
             pass
 
-    # Simple fallback: "one day"
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low_norm)
+    # fallback: "one day"
+    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low)
     if m:
-        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": delay_sign * 1, "_source": "regex"}
+        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1, "_source": "regex"}
 
     return {"intent": "unknown", "raw": user_text, "_source": "regex"}
+
 
 def extract_intent(user_text: str) -> dict:
     try:
@@ -399,6 +323,7 @@ def extract_intent(user_text: str) -> dict:
     except Exception:
         pass
     return _regex_fallback(user_text)
+
 
 def validate_intent(payload: dict, orders_df, sched_df):
     intent = payload.get("intent")
@@ -424,13 +349,13 @@ def validate_intent(payload: dict, orders_df, sched_df):
 
     if intent == "delay_order":
         # normalize numbers and allow minutes
-        for k in ("days","hours","minutes"):
+        for k in ("days", "hours", "minutes"):
             if k in payload and payload[k] is not None:
                 try:
                     payload[k] = float(payload[k])
                 except Exception:
                     return False, f"{k.capitalize()} must be numeric."
-        if not any(payload.get(k) for k in ("days","hours","minutes")):
+        if not any(payload.get(k) for k in ("days", "hours", "minutes")):
             return False, "Delay needs a duration (days/hours/minutes)."
         return True, "ok"
 
@@ -451,6 +376,7 @@ def validate_intent(payload: dict, orders_df, sched_df):
         return True, "ok"
 
     return False, "Invalid payload"
+
 
 # ============================ APPLY FUNCTIONS =========================
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
@@ -492,6 +418,7 @@ def apply_swap(schedule_df: pd.DataFrame, a: str, b: str):
     s = apply_delay(s, a, days=da.days, hours=da.seconds // 3600, minutes=(da.seconds % 3600)//60)
     s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600, minutes=(db.seconds % 3600)//60)
     return s
+
 
 # ============================ FILTER & CHART =========================
 sched = st.session_state.schedule_df.copy()
@@ -558,46 +485,116 @@ else:
     )
     st.altair_chart(gantt, use_container_width=True)
 
-# ============================ VOICE → COMMAND (UC2 V3, mic recording) =========================
-with st.expander("🎤 Voice to Command (UC2 V3)"):
-    st.caption("Click the mic, speak a command (e.g. “swap O027 with O031”, “move O014 to Aug 30 09:13”, “delay O021 by 1h 30m”), then confirm.")
 
-    # 1) Record: returns WAV bytes or None
-    recorded_wav = st_audiorec()  # microphone button + recording UI
+# ============================ DEEPGRAM: TRANSCRIBE BYTES =========================
+def _deepgram_transcribe_bytes(audio_bytes: bytes, mimetype: str = "audio/wav") -> str:
+    """
+    Transcribe recorded audio bytes using Deepgram (pre-recorded REST).
+    Requires DEEPGRAM_API_KEY.
+    """
+    key = os.getenv("DEEPGRAM_API_KEY")
+    if not key:
+        raise RuntimeError("DEEPGRAM_API_KEY not set")
+    import requests
+    url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=en"
+    headers = {"Authorization": f"Token {key}", "Content-Type": mimetype}
+    r = requests.post(url, headers=headers, data=audio_bytes, timeout=45)
+    try:
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"Deepgram error: {r.text}") from e
+    j = r.json()
+    try:
+        return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
+    except Exception:
+        raise RuntimeError(f"Deepgram: no transcript in response: {j}")
 
-    # 2) Actions
-    col1, col2 = st.columns([1,1])
-    with col1:
-        transcribe_btn = st.button("Transcribe", disabled=(recorded_wav is None))
-    with col2:
-        clear_btn = st.button("Clear")
 
-    if clear_btn:
-        st.session_state.pop("pending_voice_text", None)
+# ============================ COMMAND PIPELINE (shared) =========================
+def _process_and_apply(cmd_text: str, *, source_hint: str = None):
+    from copy import deepcopy
+    try:
+        payload = extract_intent(cmd_text)
+        ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
+
+        # log it (json-safe)
+        log_payload = deepcopy(payload)
+        if "_target_dt" in log_payload:
+            log_payload["_target_dt"] = str(log_payload["_target_dt"])
+        st.session_state.cmd_log.append({
+            "raw": cmd_text,
+            "payload": log_payload,
+            "ok": bool(ok),
+            "msg": msg,
+            "source": source_hint or payload.get("_source", "?")
+        })
+        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
+
+        if not ok:
+            st.error(f"❌ Cannot apply: {msg}")
+            return
+
+        if payload["intent"] == "delay_order":
+            st.session_state.schedule_df = apply_delay(
+                st.session_state.schedule_df,
+                payload["order_id"],
+                days=payload.get("days", 0),
+                hours=payload.get("hours", 0),
+                minutes=payload.get("minutes", 0),
+            )
+            st.success(f"✅ Delayed {payload['order_id']}.")
+
+        elif payload["intent"] == "move_order":
+            st.session_state.schedule_df = apply_move(
+                st.session_state.schedule_df,
+                payload["order_id"],
+                payload["_target_dt"],
+            )
+            st.success(f"✅ Moved {payload['order_id']}.")
+
+        elif payload["intent"] == "swap_orders":
+            st.session_state.schedule_df = apply_swap(
+                st.session_state.schedule_df,
+                payload["order_id"],
+                payload["order_id_2"],
+            )
+            st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']}.")
+
         st.rerun()
+    except Exception as e:
+        st.error(f"⚠️ Error: {e}")
 
-    # 3) Transcribe on click
-    if transcribe_btn and recorded_wav:
-        try:
-            text = _transcribe_audio_bytes(recorded_wav, ext="wav")
-            if not text:
-                st.warning("No speech detected.")
-            else:
-                st.session_state.pending_voice_text = text
-                st.success("Transcribed ✓")
-        except Exception as e:
-            st.error(f"Transcription failed: {e}")
 
-    # 4) Show and apply
-    if st.session_state.get("pending_voice_text"):
-        st.markdown("**Transcribed text:**")
-        st.code(st.session_state.pending_voice_text)
-        run_col, _ = st.columns([1,3])
-        with run_col:
-            if st.button("▶️ Run as command"):
-                _process_command(st.session_state.pending_voice_text, source_hint="voice")
+# ============================ VOICE → (see text) → AUTO-SEND ====================
+with st.expander("🎤 Voice to Command (Deepgram)"):
+    st.caption("Click the mic, speak a command (e.g. “swap O027 with O031”, “move O014 to Aug 30 09:13”, “delay O021 by 1h 30m”).\n"
+               "We’ll show the transcription above and **auto-send** it to the command pipeline.")
 
-# ============================ INTELLIGENCE INPUT (text) =========================
-user_cmd = st.chat_input("Type a command (delay/move/swap)…", key="cmd_input")
+    # A) Record in browser (returns wav bytes when you stop recording)
+    recorded_wav = st_audiorec()  # mic UI
+
+    # B) If a new recording arrived, transcribe -> show -> auto-apply once
+    if recorded_wav:
+        # fingerprint so we don't re-run repeatedly after first process
+        fp = (len(recorded_wav), hash(recorded_wav[:1024]))
+        if fp != st.session_state.last_rec_fingerprint:
+            st.session_state.last_rec_fingerprint = fp
+            try:
+                transcript = _deepgram_transcribe_bytes(recorded_wav, mimetype="audio/wav")
+                if transcript:
+                    with st.spinner("Transcribing…"):
+                        # Show transcription (so user "sees it in the prompt area")
+                        st.markdown("**Transcribed text:**")
+                        st.code(transcript)
+                        # Auto-send to OpenAI pipeline immediately
+                        st.toast("Transcription ready → applying command…")
+                        _process_and_apply(transcript, source_hint="voice/deepgram")
+                else:
+                    st.warning("No speech detected.")
+            except Exception as e:
+                st.error(f"Transcription failed: {e}")
+
+# ============================ TEXT PROMPT (unchanged) ===========================
+user_cmd = st.chat_input("Type a command (delay/move/swap)…")
 if user_cmd:
-    _process_command(user_cmd)
+    _process_and_apply(user_cmd, source_hint="text")
