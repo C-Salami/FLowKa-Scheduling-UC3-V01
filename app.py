@@ -238,33 +238,55 @@ def extract_intent(user_text: str) -> dict:
 
 def validate_intent(payload: dict, orders_df, sched_df):
     intent = payload.get("intent")
-    def order_exists(oid): return oid and (orders_df["order_id"] == oid).any()
-    if intent not in ("delay_order","move_order","swap_orders"): return False, "Unsupported intent"
-    if intent in ("delay_order","move_order","swap_orders"):
-        oid = payload.get("order_id"); if not order_exists(oid): return False, f"Unknown order_id: {oid}"
+
+    def order_exists(oid):
+        return oid and (orders_df["order_id"] == oid).any()
+
+    if intent not in ("delay_order", "move_order", "swap_orders"):
+        return False, "Unsupported intent"
+
+    if intent in ("delay_order", "move_order", "swap_orders"):
+        oid = payload.get("order_id")
+        if not order_exists(oid):
+            return False, f"Unknown order_id: {oid}"
+
     if intent == "swap_orders":
         oid2 = payload.get("order_id_2")
-        if not order_exists(oid2): return False, f"Unknown order_id_2: {oid2}"
-        if oid2 == payload.get("order_id"): return False, "Cannot swap the same order."
+        if not order_exists(oid2):
+            return False, f"Unknown order_id_2: {oid2}"
+        if oid2 == payload.get("order_id"):
+            return False, "Cannot swap the same order."
         return True, "ok"
+
     if intent == "delay_order":
-        for k in ("days","hours","minutes"):
+        for k in ("days", "hours", "minutes"):
             if k in payload and payload[k] is not None:
-                try: payload[k] = float(payload[k])
-                except: return False, f"{k.capitalize()} must be numeric."
-        if not any(payload.get(k) for k in ("days","hours","minutes")): return False, "Delay needs a duration (days/hours/minutes)."
+                try:
+                    payload[k] = float(payload[k])
+                except Exception:
+                    return False, f"{k.capitalize()} must be numeric."
+        if not any(payload.get(k) for k in ("days", "hours", "minutes")):
+            return False, "Delay needs a duration (days/hours/minutes)."
         return True, "ok"
+
     if intent == "move_order":
-        date_str = payload.get("date"); hhmm = payload.get("time") or "08:00"
-        if not date_str: return False, "Move needs a date."
+        date_str = payload.get("date")
+        hhmm = payload.get("time") or "08:00"
+        if not date_str:
+            return False, "Move needs a date."
         try:
             dt = dtp.parse(f"{date_str} {hhmm}")
-            tz = TZ if dt.tzinfo is None else None
-            dt = TZ.localize(dt) if tz else dt.astimezone(TZ)
+            if dt.tzinfo is None:
+                dt = TZ.localize(dt)
+            else:
+                dt = dt.astimezone(TZ)
             payload["_target_dt"] = dt
-        except: return False, f"Unparseable datetime: {date_str} {hhmm}"
+        except Exception:
+            return False, f"Unparseable datetime: {date_str} {hhmm}"
         return True, "ok"
+
     return False, "Invalid payload"
+
 
 # ============================ APPLY FUNCTIONS =========================
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
