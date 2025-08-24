@@ -7,3 +7,5 @@ python-dateutil==2.9.0.post0
 pytz==2024.1
 openai>=1.40.0
 streamlit-audiorec
+requests>=2.31.0
+
