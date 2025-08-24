@@ -9,6 +9,7 @@ from dateutil import parser as dtp
 import streamlit as st
 import pandas as pd
 import altair as alt
+from st_audiorec import st_audiorec  # <— mic recorder component
 
 # ============================ PAGE & SECRETS ============================
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
@@ -22,6 +23,7 @@ except Exception:
 # ============================ DATA LOADING =============================
 @st.cache_data
 def load_data():
+    # expects CSVs created by generate_sample_data.py inside ./data
     orders = pd.read_csv("data/scooter_orders.csv", parse_dates=["due_date"])
     sched = pd.read_csv("data/scooter_schedule.csv", parse_dates=["start", "end", "due_date"])
     return orders, sched
@@ -135,22 +137,21 @@ wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
 # ============================ HELPERS (UC2 V3) =========================
-def _transcribe_audio_to_text(uploaded_file) -> str:
+def _transcribe_audio_bytes(audio_bytes: bytes, ext: str = "wav") -> str:
     """
-    Uses OpenAI transcription if key is available.
-    Accepts a Streamlit UploadedFile. Returns text (may be empty) or raises.
+    Takes raw audio bytes (e.g., from st_audiorec), writes to a temp file,
+    and transcribes via OpenAI.
     """
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set")
     from openai import OpenAI
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    # Persist to a temp file for the SDK
-    suffix = "." + (uploaded_file.name.split(".")[-1].lower() if "." in uploaded_file.name else "webm")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getvalue())
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+        tmp.write(audio_bytes)
         tmp_path = tmp.name
     try:
-        # Prefer newer transcribe models; fallback to whisper-1
+        # Prefer modern transcribe models; fallback to whisper-1
         try_models = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
         last_err = None
         for m in try_models:
@@ -557,25 +558,28 @@ else:
     )
     st.altair_chart(gantt, use_container_width=True)
 
-# ============================ VOICE → COMMAND (UC2 V3) =========================
+# ============================ VOICE → COMMAND (UC2 V3, mic recording) =========================
 with st.expander("🎤 Voice to Command (UC2 V3)"):
-    st.caption("Upload a short voice note: e.g. *“swap O027 with O031”*, *“move O014 to Aug 30 09:13”*, or *“delay O021 by 1h 30m”*.")
-    audio_file = st.file_uploader(
-        "Audio (wav, mp3, m4a, webm, ogg)", type=["wav", "mp3", "m4a", "webm", "ogg"], accept_multiple_files=False
-    )
-    col_a, col_b = st.columns([1,1])
-    with col_a:
-        transcribe_btn = st.button("Transcribe", disabled=(audio_file is None))
-    with col_b:
-        clear_pending = st.button("Clear pending", type="secondary")
+    st.caption("Click the mic, speak a command (e.g. “swap O027 with O031”, “move O014 to Aug 30 09:13”, “delay O021 by 1h 30m”), then confirm.")
 
-    if clear_pending and "pending_voice_text" in st.session_state:
+    # 1) Record: returns WAV bytes or None
+    recorded_wav = st_audiorec()  # microphone button + recording UI
+
+    # 2) Actions
+    col1, col2 = st.columns([1,1])
+    with col1:
+        transcribe_btn = st.button("Transcribe", disabled=(recorded_wav is None))
+    with col2:
+        clear_btn = st.button("Clear")
+
+    if clear_btn:
         st.session_state.pop("pending_voice_text", None)
-        st.experimental_rerun()
+        st.rerun()
 
-    if transcribe_btn and audio_file is not None:
+    # 3) Transcribe on click
+    if transcribe_btn and recorded_wav:
         try:
-            text = _transcribe_audio_to_text(audio_file)
+            text = _transcribe_audio_bytes(recorded_wav, ext="wav")
             if not text:
                 st.warning("No speech detected.")
             else:
@@ -584,6 +588,7 @@ with st.expander("🎤 Voice to Command (UC2 V3)"):
         except Exception as e:
             st.error(f"Transcription failed: {e}")
 
+    # 4) Show and apply
     if st.session_state.get("pending_voice_text"):
         st.markdown("**Transcribed text:**")
         st.code(st.session_state.pending_voice_text)
