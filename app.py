@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import tempfile
 from datetime import timedelta
 import pytz
 from dateutil import parser as dtp
@@ -132,6 +133,95 @@ if st.session_state.filters_open:
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
+
+# ============================ HELPERS (UC2 V3) =========================
+def _transcribe_audio_to_text(uploaded_file) -> str:
+    """
+    Uses OpenAI transcription if key is available.
+    Accepts a Streamlit UploadedFile. Returns text (may be empty) or raises.
+    """
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY not set")
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    # Persist to a temp file for the SDK
+    suffix = "." + (uploaded_file.name.split(".")[-1].lower() if "." in uploaded_file.name else "webm")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getvalue())
+        tmp_path = tmp.name
+    try:
+        # Prefer newer transcribe models; fallback to whisper-1
+        try_models = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
+        last_err = None
+        for m in try_models:
+            try:
+                with open(tmp_path, "rb") as f:
+                    resp = client.audio.transcriptions.create(model=m, file=f)
+                return (getattr(resp, "text", None) or resp.get("text") or "").strip()
+            except Exception as e:
+                last_err = e
+        raise last_err or RuntimeError("Transcription failed")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+def _process_command(cmd_text: str, *, source_hint: str = None):
+    """
+    Shared path to extract/validate/apply any command text (typed or transcribed).
+    """
+    from copy import deepcopy
+    try:
+        payload = extract_intent(cmd_text)
+        ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
+
+        # log it (json-safe)
+        log_payload = deepcopy(payload)
+        if "_target_dt" in log_payload:
+            log_payload["_target_dt"] = str(log_payload["_target_dt"])
+        st.session_state.cmd_log.append({
+            "raw": cmd_text,
+            "payload": log_payload,
+            "ok": bool(ok),
+            "msg": msg,
+            "source": source_hint or payload.get("_source", "?")
+        })
+        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
+
+        if not ok:
+            st.error(f"❌ Cannot apply: {msg}")
+            return
+
+        if payload["intent"] == "delay_order":
+            st.session_state.schedule_df = apply_delay(
+                st.session_state.schedule_df,
+                payload["order_id"],
+                days=payload.get("days", 0),
+                hours=payload.get("hours", 0),
+                minutes=payload.get("minutes", 0),
+            )
+            st.success(f"✅ Delayed {payload['order_id']}.")
+
+        elif payload["intent"] == "move_order":
+            st.session_state.schedule_df = apply_move(
+                st.session_state.schedule_df,
+                payload["order_id"],
+                payload["_target_dt"],
+            )
+            st.success(f"✅ Moved {payload['order_id']}.")
+
+        elif payload["intent"] == "swap_orders":
+            st.session_state.schedule_df = apply_swap(
+                st.session_state.schedule_df,
+                payload["order_id"],
+                payload["order_id_2"],
+            )
+            st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']}.")
+
+        st.rerun()
+    except Exception as e:
+        st.error(f"⚠️ Error: {e}")
 
 # ============================ NLP / INTELLIGENCE (INLINE) =========================
 INTENT_SCHEMA = {  # kept for reference; used if you enable OpenAI path
@@ -467,57 +557,42 @@ else:
     )
     st.altair_chart(gantt, use_container_width=True)
 
-# ============================ INTELLIGENCE INPUT (single keyed instance) =========================
+# ============================ VOICE → COMMAND (UC2 V3) =========================
+with st.expander("🎤 Voice to Command (UC2 V3)"):
+    st.caption("Upload a short voice note: e.g. *“swap O027 with O031”*, *“move O014 to Aug 30 09:13”*, or *“delay O021 by 1h 30m”*.")
+    audio_file = st.file_uploader(
+        "Audio (wav, mp3, m4a, webm, ogg)", type=["wav", "mp3", "m4a", "webm", "ogg"], accept_multiple_files=False
+    )
+    col_a, col_b = st.columns([1,1])
+    with col_a:
+        transcribe_btn = st.button("Transcribe", disabled=(audio_file is None))
+    with col_b:
+        clear_pending = st.button("Clear pending", type="secondary")
+
+    if clear_pending and "pending_voice_text" in st.session_state:
+        st.session_state.pop("pending_voice_text", None)
+        st.experimental_rerun()
+
+    if transcribe_btn and audio_file is not None:
+        try:
+            text = _transcribe_audio_to_text(audio_file)
+            if not text:
+                st.warning("No speech detected.")
+            else:
+                st.session_state.pending_voice_text = text
+                st.success("Transcribed ✓")
+        except Exception as e:
+            st.error(f"Transcription failed: {e}")
+
+    if st.session_state.get("pending_voice_text"):
+        st.markdown("**Transcribed text:**")
+        st.code(st.session_state.pending_voice_text)
+        run_col, _ = st.columns([1,3])
+        with run_col:
+            if st.button("▶️ Run as command"):
+                _process_command(st.session_state.pending_voice_text, source_hint="voice")
+
+# ============================ INTELLIGENCE INPUT (text) =========================
 user_cmd = st.chat_input("Type a command (delay/move/swap)…", key="cmd_input")
-
 if user_cmd:
-    try:
-        payload = extract_intent(user_cmd)
-        ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
-
-        # log it (json-safe)
-        log_payload = dict(payload)
-        if "_target_dt" in log_payload:
-            log_payload["_target_dt"] = str(log_payload["_target_dt"])
-        st.session_state.cmd_log.append({
-            "raw": user_cmd,
-            "payload": log_payload,
-            "ok": bool(ok),
-            "msg": msg,
-            "source": payload.get("_source", "?")
-        })
-        st.session_state.cmd_log = st.session_state.cmd_log[-50:]
-
-        if not ok:
-            st.error(f"❌ Cannot apply: {msg}")
-        else:
-            if payload["intent"] == "delay_order":
-                st.session_state.schedule_df = apply_delay(
-                    st.session_state.schedule_df,
-                    payload["order_id"],
-                    days=payload.get("days", 0),
-                    hours=payload.get("hours", 0),
-                    minutes=payload.get("minutes", 0),
-                )
-                st.success(f"✅ Delayed {payload['order_id']}.")
-
-            elif payload["intent"] == "move_order":
-                st.session_state.schedule_df = apply_move(
-                    st.session_state.schedule_df,
-                    payload["order_id"],
-                    payload["_target_dt"],
-                )
-                st.success(f"✅ Moved {payload['order_id']}.")
-
-            elif payload["intent"] == "swap_orders":
-                st.session_state.schedule_df = apply_swap(
-                    st.session_state.schedule_df,
-                    payload["order_id"],
-                    payload["order_id_2"],
-                )
-                st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']}.")
-
-            st.rerun()
-
-    except Exception as e:
-        st.error(f"⚠️ Error: {e}")
+    _process_command(user_cmd)
