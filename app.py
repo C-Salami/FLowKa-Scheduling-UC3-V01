@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# Press-and-hold microphone component
+# Minimal, press-and-hold microphone component
 from streamlit_mic_recorder import mic_recorder
 
 
@@ -83,7 +83,7 @@ css = """
 [data-testid="stSidebar"] { display: SIDEBAR_DISPLAY_VALUE; }
 
 /* Leave room for bottom mic area */
-.block-container { padding-top: 6px; padding-bottom: 220px; }
+.block-container { padding-top: 6px; padding-bottom: 200px; }
 
 /* Top bar */
 .topbar {
@@ -103,31 +103,39 @@ css = """
 .bottom-wrap {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
   background: linear-gradient(to top, rgba(255,255,255,0.98), rgba(255,255,255,0.65));
-  padding: 20px 0 28px 0;
+  padding: 18px 0 24px 0;
 }
 .bottom-inner {
   max-width: 980px; margin: 0 auto; padding: 0 24px;
-  display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 18px;
+  display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 16px;
 }
 
-/* --- Pretty mic button (our visuals) --- */
-.mic-holder { position: relative; width: 68px; height: 68px; }
-.mic-btn {
-  position: absolute; inset: 0;
-  border-radius: 999px;
-  background: radial-gradient(ellipse at 30% 30%, #ffffff 0%, #f6f6f6 60%, #efefef 100%);
-  border: 1px solid #e2e2e2;
-  box-shadow: 0 6px 22px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.9);
-  display: flex; align-items: center; justify-content: center;
-  transition: transform .08s ease, box-shadow .2s ease, border-color .2s ease;
-  cursor: pointer;
-}
-.mic-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(0,0,0,0.14), inset 0 1px 0 rgba(255,255,255,0.9); }
-.mic-btn:active { transform: translateY(0px) scale(0.98); }
+/* --- Minimalist mic (style the recorder widget itself) --- */
+.rec-wrap { position: relative; width: 64px; height: 64px; }
+.rec-wrap > div { width: 64px !important; height: 64px !important; }
 
-.mic-icon {
-  width: 28px; height: 28px;
-  background: #111; -webkit-mask: url('data:image/svg+xml;utf8,\
+/* Try to grab the button the component renders and make it pretty */
+.rec-wrap button, .rec-wrap [role="button"] {
+  width: 64px !important; height: 64px !important; padding: 0 !important;
+  border-radius: 999px !important;
+  background: radial-gradient(ellipse at 30% 30%, #ffffff 0%, #f7f7f7 60%, #efefef 100%) !important;
+  border: 1px solid #e6e6e6 !important;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12) !important;
+}
+.rec-wrap button:hover, .rec-wrap [role="button"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.16) !important;
+}
+
+/* Hide any checkbox / stray controls the widget renders */
+.rec-wrap input[type="checkbox"], .rec-wrap label { display: none !important; }
+
+/* Replace inner text with a mic glyph using a pseudo element (minimal) */
+.rec-wrap button::before, .rec-wrap [role="button"]::before {
+  content: "";
+  display: block; width: 24px; height: 24px; margin: 0 auto;
+  background: #111;
+  -webkit-mask: url('data:image/svg+xml;utf8,\
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
   <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
           mask: url('data:image/svg+xml;utf8,\
@@ -135,21 +143,12 @@ css = """
   <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
 }
 
-/* Pulse ring while pressing */
-.mic-btn:active::after {
-  content: ""; position: absolute; inset: -10px; border-radius: 999px;
-  box-shadow: 0 0 0 6px rgba(255,0,0,0.18);
-}
-
-/* The actual recorder element sits over the button but invisible */
-.mic-hotspot { position: absolute; inset: 0; opacity: 0; }
-
 /* Transcript box */
 .transcript-box {
-  min-height: 48px;
+  min-height: 44px;
   border: 1px dashed #e2e2e2;
   border-radius: 12px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   background: #fbfbfb;
   font-size: 14px;
   color: #333;
@@ -644,34 +643,21 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
         st.error(f"⚠️ Error: {e}")
 
 
-# ============================ BOTTOM MIC (no prompt bar) =========================
+# ============================ BOTTOM MIC (single minimalist control) =========================
 with st.container():
     st.markdown('<div class="bottom-wrap"><div class="bottom-inner">', unsafe_allow_html=True)
 
-    # Pretty mic button (our visuals)
-    st.markdown(
-        """
-        <div class="mic-holder">
-          <div class="mic-btn" title="Hold to speak">
-            <div class="mic-icon"></div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # The only visible control: the recorder itself, restyled via CSS above
+    st.markdown('<div class="rec-wrap">', unsafe_allow_html=True)
+    rec = mic_recorder(
+        start_prompt="",   # no text labels
+        stop_prompt="",
+        key="press_mic",
+        just_once=False,
+        format="wav",
+        use_container_width=False
     )
-
-    # Invisible hotspot on top that actually records
-    hotspot = st.container()
-    with hotspot:
-        st.markdown('<div class="mic-hotspot">', unsafe_allow_html=True)
-        rec = mic_recorder(
-            start_prompt="", stop_prompt="",
-            key="press_mic",
-            just_once=False,
-            format="wav",
-            use_container_width=False
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # Transcript area
     if st.session_state.last_transcript:
