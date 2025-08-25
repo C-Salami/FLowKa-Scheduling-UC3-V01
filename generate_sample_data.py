@@ -13,7 +13,7 @@ WHEEL_TYPES = ["Urban-200", "Offroad-250", "Racing-180", "HeavyDuty-300", "Eco-1
 MACHINES = ["Lathe A", "Lathe B", "Grinder A", "Grinder B", "Polisher A", "Polisher B"]
 
 N_ORDERS = 30
-OPS_PER_ORDER = 3  # e.g., cut -> grind -> polish
+OPS_PER_ORDER = 3  # e.g., cutting -> grinding -> polishing
 
 start_base = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
 data_sched = []
