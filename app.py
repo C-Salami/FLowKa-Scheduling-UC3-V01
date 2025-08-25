@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# Single-icon, press-and-hold microphone component
+# Press-and-hold microphone component (logic unchanged)
 from streamlit_mic_recorder import mic_recorder
 
 
@@ -26,9 +26,7 @@ for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
 
 # ============================ DATA LOADING =============================
 def _oNNN_to_order(text: str) -> str:
-    """
-    Convert legacy 'O071' -> 'Order 71'. If it doesn't match legacy, return text.
-    """
+    """Convert legacy 'O071' -> 'Order 71'. If it doesn't match legacy, return text."""
     if isinstance(text, str):
         m = re.fullmatch(r"[Oo](\d{1,4})", text.strip())
         if m:
@@ -42,10 +40,8 @@ def _normalize_loaded_ids(df: pd.DataFrame, col: str = "order_id") -> pd.DataFra
 
 @st.cache_data
 def load_data():
-    # expects CSVs inside ./data
     orders = pd.read_csv("data/scooter_orders.csv", parse_dates=["due_date"])
-    sched = pd.read_csv("data/scooter_schedule.csv", parse_dates=["start", "end", "due_date"])
-    # Normalize any legacy IDs to "Order N"
+    sched  = pd.read_csv("data/scooter_schedule.csv", parse_dates=["start", "end", "due_date"])
     orders = _normalize_loaded_ids(orders, "order_id")
     sched  = _normalize_loaded_ids(sched,  "order_id")
     return orders, sched
@@ -85,7 +81,7 @@ st.markdown(f"""
 [data-testid="stSidebar"] {{ display: {sidebar_display}; }}
 
 /* Leave room for bottom mic area */
-.block-container {{ padding-top: 6px; padding-bottom: 200px; }}
+.block-container {{ padding-top: 6px; padding-bottom: 220px; }}
 
 /* Top bar */
 .topbar {{
@@ -104,32 +100,62 @@ st.markdown(f"""
 /* Bottom mic area */
 .bottom-wrap {{
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
-  background: linear-gradient(to top, rgba(255,255,255,0.95), rgba(255,255,255,0.55));
-  padding: 18px 0 24px 0;
+  background: linear-gradient(to top, rgba(255,255,255,0.98), rgba(255,255,255,0.65));
+  padding: 20px 0 28px 0;
 }}
 .bottom-inner {{
   max-width: 980px; margin: 0 auto; padding: 0 24px;
-  display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 16px;
+  display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 18px;
 }}
-.mic-shell {{
-  width: 56px; height: 56px; border-radius: 999px;
-  background: #ffffff; border: 1px solid #e5e5e5;
+
+/* --- Pretty mic button (our own visuals) --- */
+.mic-holder {{
+  position: relative; width: 68px; height: 68px;
+}}
+.mic-btn {{
+  position: absolute; inset: 0;
+  border-radius: 999px;
+  background: radial-gradient(ellipse at 30% 30%, #ffffff 0%, #f6f6f6 60%, #efefef 100%);
+  border: 1px solid #e2e2e2;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.9);
   display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 2px 14px rgba(0,0,0,0.10);
+  transition: transform .08s ease, box-shadow .2s ease, border-color .2s ease;
+  cursor: pointer;
+}
+.mic-btn:hover {{ transform: translateY(-1px); box-shadow: 0 8px 24px rgba(0,0,0,0.14), inset 0 1px 0 rgba(255,255,255,0.9); }}
+.mic-btn:active {{ transform: translateY(0px) scale(0.98); }}
+
+.mic-icon {{
+  width: 28px; height: 28px;
+  background: #111; -webkit-mask: url('data:image/svg+xml;utf8,\
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
+  <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
+          mask: url('data:image/svg+xml;utf8,\
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
+  <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
 }}
-.mic-shell.recording {{
-  box-shadow: 0 0 0 6px rgba(255,0,0,0.12), 0 2px 18px rgba(255,0,0,0.28);
-  border-color: #ffb3b3;
+/* Pulse ring shown while pointer is down (visual feedback) */
+.mic-btn:active::after {{
+  content: ""; position: absolute; inset: -10px; border-radius: 999px;
+  box-shadow: 0 0 0 6px rgba(255,0,0,0.18);
 }}
+
+/* The actual recorder element sits over the button but invisible */
+.mic-hotspot {{
+  position: absolute; inset: 0; opacity: 0;  /* capture clicks/hold */
+}}
+
+/* Transcript box (unchanged, slightly tighter) */
 .transcript-box {{
-  min-height: 44px;
+  min-height: 48px;
   border: 1px dashed #e2e2e2;
   border-radius: 12px;
-  padding: 10px 12px;
-  background: #fafafa;
+  padding: 12px 14px;
+  background: #fbfbfb;
   font-size: 14px;
   color: #333;
 }}
+.placeholder {{ color:#888; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -163,7 +189,6 @@ if st.session_state.filters_open:
             st.session_state.filt_machines = machines_all
             st.rerun()
 
-        # ---- Debug panels ----
         with st.expander("🔎 Debug (voice & intent)"):
             st.caption("What Deepgram heard and what the extractor produced.")
             st.markdown("**Last Deepgram transcript:**")
@@ -191,7 +216,6 @@ wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
 # ============================ ORDER NAME HELPERS =========================
-# Accept "Order 5", "order five", "order #12", "Order seventy one", and legacy "O071"
 UNITS = {
     "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,
     "ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
@@ -211,28 +235,17 @@ def words_to_int(s: str) -> int | None:
     return None
 
 def normalize_order_name(text: str) -> str | None:
-    """
-    Extract order identifier from text and normalize to 'Order N'. Supports:
-    - "order 12", "order #12", "order twelve", "order seventy one"
-    - legacy "O071" (interprets as 71)
-    """
-    if not isinstance(text, str):
-        return None
-
-    # legacy token like O071 in free text
+    """Normalize to 'Order N'. Supports spoken numbers and legacy 'O071'."""
+    if not isinstance(text, str): return None
     legacy = re.search(r"\bO(\d{1,4})\b", text, flags=re.I)
-    if legacy:
-        return f"Order {int(legacy.group(1))}"
-
+    if legacy: return f"Order {int(legacy.group(1))}"
     m = re.search(r"\border\s*(?:#\s*)?([A-Za-z\-]+|\d{1,4})\b", text, flags=re.I)
-    if not m:
-        return None
+    if not m: return None
     token = m.group(1)
     n = words_to_int(token)
     if n is None:
         digits = re.findall(r"\d+", token)
-        if digits:
-            n = int(digits[-1])
+        if digits: n = int(digits[-1])
     return f"Order {n}" if n is not None else None
 
 # ============================ NLP / INTENT =========================
@@ -261,13 +274,10 @@ def _parse_duration_chunks(text: str):
     d = {"days":0.0,"hours":0.0,"minutes":0.0}
     def numtok(tok: str):
         tok = tok.strip().lower().replace(",", ".").replace("-", " ")
-        try:
-            return float(tok)
-        except Exception:
-            pass
+        try: return float(tok)
+        except Exception: pass
         val = words_to_int(tok)
         return float(val) if val is not None else None
-
     for num, unit in re.findall(r"([\d\.,]+|\b[\w\-]+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
         n = numtok(num)
         if n is None: continue
@@ -277,7 +287,6 @@ def _parse_duration_chunks(text: str):
         else: d["minutes"] += n
     return d
 
-# ---------- Extraction via OpenAI ----------
 def _extract_with_openai(user_text: str):
     from openai import OpenAI
     if not os.getenv("OPENAI_API_KEY"):
@@ -287,12 +296,10 @@ def _extract_with_openai(user_text: str):
         "You normalize factory scheduling edit commands for a Gantt. "
         "Return ONLY JSON matching the given schema. "
         "Supported intents: delay_order, move_order, swap_orders. "
-        "Order IDs are of the form 'Order N' (e.g., 'Order 12'). "
-        "If user says 'tomorrow' etc., convert to ISO date in Asia/Makassar. "
-        "If time missing on move_order, default 08:00. "
+        "Order IDs are of the form 'Order N'. "
+        "Convert relative dates to Asia/Makassar. Default move time 08:00. "
         "If delay units missing, assume days; minutes allowed. "
-        "If user mentions 'order five', resolve to 'Order 5'. "
-        "Accept legacy tokens like 'O071' and convert to 'Order 71'."
+        "Accept 'order five' -> 'Order 5', and legacy 'O071' -> 'Order 71'."
     )
     GUIDE = (
         '1) "delay order five one day" -> {"intent":"delay_order","order_id":"Order 5","days":1}\n'
@@ -309,13 +316,10 @@ def _extract_with_openai(user_text: str):
     )
     text = resp.output[0].content[0].text
     data = json.loads(text)
-
-    # sanitize order_id fields that may come back as variants
     for k in ("order_id", "order_id_2"):
         if k in data and isinstance(data[k], str):
             norm = normalize_order_name(data[k])
             if norm: data[k] = norm
-
     data["_source"] = "openai"
     return data
 
@@ -323,11 +327,10 @@ def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    # SWAP: "swap order 2 with order 3"
+    # SWAP
     m = re.search(r"(?:^|\b)(swap|switch)\s+(order[^,;]*)", low)
     if m:
         ids = re.findall(r"\border\s*(?:#\s*)?([A-Za-z\-]+|\d{1,4})\b", low, flags=re.I)
-        # also catch legacy "O071" appearances
         legacy = re.findall(r"\bO(\d{1,4})\b", low, flags=re.I)
         tokens = ids + legacy
         if len(tokens) >= 2:
@@ -336,7 +339,7 @@ def _regex_fallback(user_text: str):
             if a and b and a != b:
                 return {"intent": "swap_orders", "order_id": a, "order_id_2": b, "_source": "regex"}
 
-    # DELAY (delay/push/postpone vs. advance/bring forward)
+    # DELAY +/- (advance = negative)
     delay_sign = +1
     if re.search(r"\b(advance|bring\s+forward|pull\s+in)\b", low):
         delay_sign = -1
@@ -360,7 +363,7 @@ def _regex_fallback(user_text: str):
                 "_source": "regex",
             }
 
-    # implicit duration e.g. "delay order 7 two days"
+    # implicit duration
     m = re.search(r"\b(delay|push|postpone)\b.*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
     if target and m:
         dur = _parse_duration_chunks(low_norm)
@@ -374,7 +377,7 @@ def _regex_fallback(user_text: str):
                 "_source": "regex",
             }
 
-    # MOVE: "move order 12 to/on <datetime>"
+    # MOVE
     m = re.search(r"\b(move|set|schedule)\b.*?\b(to|on)\s+(.+)", low)
     if m:
         target = target or normalize_order_name(low)
@@ -392,7 +395,6 @@ def _regex_fallback(user_text: str):
             except Exception:
                 pass
 
-    # simple fallback: "delay order one day"
     if target and re.search(r"\b(delay|push|postpone)\b.*\bone day\b", low):
         return {"intent": "delay_order", "order_id": target, "days": 1, "_source": "regex"}
 
@@ -572,14 +574,11 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
 
 # ============================ PIPELINE (shared) =========================
 def _process_and_apply(cmd_text: str, *, source_hint: str = None):
-    """
-    Extract -> validate -> apply. Also records detailed logs for debugging.
-    """
+    """Extract -> validate -> apply. Also records detailed logs for debugging."""
     from copy import deepcopy
     try:
         payload = extract_intent(cmd_text)
 
-        # LOG what we sent and what we parsed
         st.session_state.last_extraction = {
             "raw": cmd_text,
             "payload": deepcopy(payload),
@@ -588,7 +587,6 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
 
         ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
 
-        # Traditional rolling log (short)
         log_payload = deepcopy(payload)
         if "_target_dt" in log_payload:
             log_payload["_target_dt"] = str(log_payload["_target_dt"])
@@ -636,28 +634,42 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
         st.error(f"⚠️ Error: {e}")
 
 # ============================ BOTTOM MIC (no prompt bar) =========================
-bottom = st.container()
-with bottom:
+with st.container():
     st.markdown('<div class="bottom-wrap"><div class="bottom-inner">', unsafe_allow_html=True)
 
-    # Mic shell (big single button). The component renders the icon; the shell provides shape/glow.
-    shell_classes = "mic-shell"
-    st.markdown(f'<div class="{shell_classes}" id="mic-shell"></div>', unsafe_allow_html=True)
-    rec = mic_recorder(
-        start_prompt="", stop_prompt="",
-        key="press_mic",
-        just_once=False,
-        format="wav",
-        use_container_width=False
+    # Pretty mic button (our visuals)
+    st.markdown(
+        """
+        <div class="mic-holder">
+          <div class="mic-btn" title="Hold to speak">
+            <div class="mic-icon"></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    # Transcript box (shows what was said after release)
+    # Invisible hotspot on top that actually records
+    # (We keep it in the same container so it covers the mic button perfectly.)
+    hotspot = st.container()
+    with hotspot:
+        st.markdown('<div class="mic-hotspot">', unsafe_allow_html=True)
+        rec = mic_recorder(
+            start_prompt="", stop_prompt="",
+            key="press_mic",
+            just_once=False,
+            format="wav",
+            use_container_width=False
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Transcript area
     if st.session_state.last_transcript:
         st.markdown(f'<div class="transcript-box">{st.session_state.last_transcript}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="transcript-box" style="color:#888;">(your transcript will appear here)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="transcript-box placeholder">(your transcript will appear here)</div>', unsafe_allow_html=True)
 
-    st.markdown('</div></div>', unsafe_allow_html=True)  # close bottom containers
+    st.markdown('</div></div>', unsafe_allow_html=True)
 
 # When a recording finishes: transcribe -> show below mic -> apply automatically
 if rec and isinstance(rec, dict) and rec.get("bytes"):
@@ -669,7 +681,6 @@ if rec and isinstance(rec, dict) and rec.get("bytes"):
             with st.spinner("Transcribing…"):
                 transcript = _deepgram_transcribe_bytes(wav_bytes, mimetype="audio/wav")
             st.session_state.last_transcript = transcript  # exact text from Deepgram
-            # Immediately apply what we transcribed
             if transcript:
                 _process_and_apply(transcript, source_hint="voice/deepgram")
             else:
