@@ -9,8 +9,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# Press-and-hold mic (single icon)
-# (make sure requirements.txt includes: streamlit-mic-recorder, requests>=2.31.0)
+# Single-icon, press-and-hold microphone component
 from streamlit_mic_recorder import mic_recorder
 
 
@@ -22,7 +21,7 @@ for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
     try:
         os.environ[k] = os.environ.get(k) or st.secrets[k]
     except Exception:
-        pass  # ok if not present (we’ll gracefully fallback)
+        pass  # ok
 
 
 # ============================ DATA LOADING =============================
@@ -48,19 +47,38 @@ if "filt_machines" not in st.session_state:
     st.session_state.filt_machines = sorted(base_schedule["machine"].unique().tolist())
 if "cmd_log" not in st.session_state:
     st.session_state.cmd_log = []
+
+# prompt bar text (we control/set this to show transcript)
+if "prompt_text" not in st.session_state:
+    st.session_state.prompt_text = ""
+
+# voice pipeline bookkeeping
 if "last_audio_fp" not in st.session_state:
     st.session_state.last_audio_fp = None
-# NEW: logs for visibility
 if "last_transcript" not in st.session_state:
     st.session_state.last_transcript = None
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
 
+# two-step auto-apply: show in prompt first, then apply on next run
+if "await_apply" not in st.session_state:
+    st.session_state.await_apply = False
+if "await_apply_source" not in st.session_state:
+    st.session_state.await_apply_source = None
+
+
 # ============================ CSS / LAYOUT ============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
 st.markdown(f"""
 <style>
+/* Hide Streamlit default footer/menu */
+#MainMenu, footer {{ visibility: hidden; }}
+
+/* Sidebar collapsible */
 [data-testid="stSidebar"] {{ display: {sidebar_display}; }}
+
+/* Tighten spacing and leave extra room for bottom prompt bar */
+.block-container {{ padding-top: 6px; padding-bottom: 112px; }}
 
 /* Top bar */
 .topbar {{
@@ -76,32 +94,32 @@ st.markdown(f"""
 }}
 .topbar .btn:hover {{ opacity: 0.9; }}
 
-/* Leave room at bottom for the prompt + mic */
-.block-container {{ padding-top: 6px; padding-bottom: 96px; }}
-
-/* Hide Streamlit default footer/menu */
-#MainMenu, footer {{ visibility: hidden; }}
-
-/* Bottom prompt row (ChatGPT-like) */
+/* Bottom prompt bar (ChatGPT-style) */
 .prompt-wrap {{
-  position: fixed; left: 24px; right: 24px; bottom: 18px; z-index: 1000;
+  position: fixed; left: 24px; right: 24px; bottom: 20px; z-index: 1000;
 }}
 .prompt-inner {{
-  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px;
+  display: grid; grid-template-columns: 1fr 44px; align-items: center; gap: 10px;
 }}
-.pill {{
+.prompt-pill {{
   background: #fff; border: 1px solid #e6e6e6; border-radius: 28px;
-  padding: 6px 12px; display: grid; grid-template-columns: 1fr auto; align-items: center;
+  padding: 6px 12px;
 }}
-.mic-slot {{ margin-left: 8px; }}
-
-/* Floating transcript toast preview */
+/* position the mic icon as if it's inside the right edge of the pill */
+.mic-overlay {{
+  position: relative; width: 44px; height: 44px;
+}}
+.mic-overlay .st-emotion-cache-0 {{  /* try to keep mic visually tight */
+  position: absolute; right: 0; top: 0;
+}}
+/* tiny floating transcript preview */
 .transient {{
-  position: fixed; right: 24px; bottom: 72px; background: #111; color:#fff;
+  position: fixed; right: 24px; bottom: 74px; background: #111; color:#fff;
   padding: 8px 12px; border-radius: 10px; font-size: 12px; opacity: .92;
 }}
 </style>
 """, unsafe_allow_html=True)
+
 
 # ============================ TOP BAR ============================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
@@ -111,6 +129,7 @@ if st.button(toggle_label, key="toggle_filters_btn"):
     st.session_state.filters_open = not st.session_state.filters_open
     st.rerun()
 st.markdown('</div></div>', unsafe_allow_html=True)
+
 
 # ============================ SIDEBAR FILTERS =========================
 if st.session_state.filters_open:
@@ -155,12 +174,14 @@ if st.session_state.filters_open:
             else:
                 st.caption("No commands yet.")
 
+
 # ============================ EFFECTIVE FILTERS =========================
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
-# ============================ NLP / INTENT (same path) =========================
+
+# ============================ NLP / INTENT =========================
 INTENT_SCHEMA = {
   "type": "object",
   "properties": {
@@ -202,22 +223,16 @@ def _num_token_to_float(tok: str):
     return None
 
 def _parse_duration_chunks(text: str):
-    """
-    Parses '1h 30m', '90 minutes', '1.5 hours', '2 days', '45m', '75 min'
-    Returns dict like {'days':2,'hours':1,'minutes':30}
-    """
     d = {"days":0.0,"hours":0.0,"minutes":0.0}
     for num, unit in re.findall(r"([\d\.,]+|\b\w+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
         n = _num_token_to_float(num)
-        if n is None:
-            continue
+        if n is None: continue
         u = unit.lower()
         if u.startswith("d"): d["days"] += n
         elif u.startswith("h"): d["hours"] += n
         else: d["minutes"] += n
     return d
 
-# ---------- Extraction via OpenAI (unchanged path for text -> OpenAI) ----------
 def _extract_with_openai(user_text: str):
     from openai import OpenAI
     if not os.getenv("OPENAI_API_KEY"):
@@ -230,7 +245,7 @@ def _extract_with_openai(user_text: str):
         "Order IDs look like O021 (3 digits). "
         "If user says 'tomorrow' etc., convert to ISO date in Asia/Makassar. "
         "If time missing on move_order, default 08:00. "
-        "If delay units missing, assume days. You may return minutes too."
+        "If delay units missing, assume days; minutes allowed."
     )
     USER_GUIDE = (
         '1) "delay O021 one day" -> {"intent":"delay_order","order_id":"O021","days":1}\n'
@@ -257,12 +272,12 @@ def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    # SWAP: "swap O023 with O053" etc.
+    # SWAP
     m = re.search(r"(?:^|\b)(swap|switch)\s+(o\d{3})\s*(?:with|and|&)?\s*(o\d{3})\b", low)
     if m:
-        return {"intent": "swap_orders", "order_id": m.group(2).upper(), "order_id_2": m.group(3).upper(), "_source": "regex"}
+        return {"intent":"swap_orders","order_id":m.group(2).upper(),"order_id_2":m.group(3).upper(),"_source":"regex"}
 
-    # DELAY synonyms: delay/push/postpone (positive), advance/bring forward/pull in (negative)
+    # DELAY +/- (advance = negative)
     delay_sign = +1
     if re.search(r"\b(advance|bring\s+forward|pull\s+in)\b", low):
         delay_sign = -1
@@ -270,60 +285,36 @@ def _regex_fallback(user_text: str):
     else:
         low_norm = low
 
-    # with explicit "by <duration>"
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\bby\b\s+(.+)$", low_norm)
     if m:
         oid = m.group(2).upper()
-        dur_text = m.group(3)
-        dur = _parse_duration_chunks(dur_text)
-        if any(v != 0 for v in dur.values()):
-            return {
-                "intent": "delay_order",
-                "order_id": oid,
-                "days": delay_sign * dur["days"],
-                "hours": delay_sign * dur["hours"],
-                "minutes": delay_sign * dur["minutes"],
-                "_source": "regex",
-            }
+        dur = _parse_duration_chunks(m.group(3))
+        if any(v!=0 for v in dur.values()):
+            return {"intent":"delay_order","order_id":oid,
+                    "days":delay_sign*dur["days"],"hours":delay_sign*dur["hours"],
+                    "minutes":delay_sign*dur["minutes"],"_source":"regex"}
 
-    # without "by", e.g. "delay O076 two days"
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
     if m:
         oid = m.group(2).upper()
         dur = _parse_duration_chunks(low_norm)
-        if any(v != 0 for v in dur.values()):
-            return {
-                "intent": "delay_order",
-                "order_id": oid,
-                "days": delay_sign * dur["days"],
-                "hours": delay_sign * dur["hours"],
-                "minutes": delay_sign * dur["minutes"],
-                "_source": "regex",
-            }
+        if any(v!=0 for v in dur.values()):
+            return {"intent":"delay_order","order_id":oid,
+                    "days":delay_sign*dur["days"],"hours":delay_sign*dur["hours"],
+                    "minutes":delay_sign*dur["minutes"],"_source":"regex"}
 
-    # MOVE: "move Oxxx to/on <datetime>"
     m = re.search(r"(move|set|schedule)\s+(o\d{3})\s+(to|on)\s+(.+)", low)
     if m:
-        oid = m.group(2).upper()
-        when = m.group(4)
+        oid = m.group(2).upper(); when = m.group(4)
         try:
             dt = dtp.parse(when, fuzzy=True)
-            return {
-                "intent": "move_order",
-                "order_id": oid,
-                "date": dt.date().isoformat(),
-                "time": dt.strftime("%H:%M"),
-                "_source": "regex",
-            }
+            return {"intent":"move_order","order_id":oid,"date":dt.date().isoformat(),"time":dt.strftime("%H:%M"),"_source":"regex"}
         except Exception:
             pass
 
-    # fallback: "one day"
     m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low)
-    if m:
-        return {"intent": "delay_order", "order_id": m.group(2).upper(), "days": 1, "_source": "regex"}
-
-    return {"intent": "unknown", "raw": user_text, "_source": "regex"}
+    if m: return {"intent":"delay_order","order_id":m.group(2).upper(),"days":1,"_source":"regex"}
+    return {"intent":"unknown","raw":user_text,"_source":"regex"}
 
 def extract_intent(user_text: str) -> dict:
     try:
@@ -342,7 +333,6 @@ def validate_intent(payload: dict, orders_df, sched_df):
     if intent not in ("delay_order", "move_order", "swap_orders"):
         return False, "Unsupported intent"
 
-    # Common: require valid order(s)
     if intent in ("delay_order", "move_order", "swap_orders"):
         oid = payload.get("order_id")
         if not order_exists(oid):
@@ -357,14 +347,13 @@ def validate_intent(payload: dict, orders_df, sched_df):
         return True, "ok"
 
     if intent == "delay_order":
-        # normalize and allow minutes
-        for k in ("days", "hours", "minutes"):
+        for k in ("days","hours","minutes"):
             if k in payload and payload[k] is not None:
                 try:
                     payload[k] = float(payload[k])
                 except Exception:
                     return False, f"{k.capitalize()} must be numeric."
-        if not any(payload.get(k) for k in ("days", "hours", "minutes")):
+        if not any(payload.get(k) for k in ("days","hours","minutes")):
             return False, "Delay needs a duration (days/hours/minutes)."
         return True, "ok"
 
@@ -560,44 +549,85 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
         st.error(f"⚠️ Error: {e}")
 
 
-# ============================ PROMPT + INLINE MIC =========================
-# 1) Text input remains (for typing)
-typed = st.chat_input("Type a command (or press & hold the mic)…")
-if typed:
-    _process_and_apply(typed, source_hint="text")
+# ============================ BOTTOM PROMPT BAR + INLINE MIC =========================
+# 1) Render the prompt bar: our own text input we control
+prompt_placeholder = st.empty()
+with prompt_placeholder.container():
+    st.markdown(
+        '<div class="prompt-wrap"><div class="prompt-inner">'
+        '<div class="prompt-pill"></div>'
+        '<div class="mic-overlay"></div>'
+        '</div></div>',
+        unsafe_allow_html=True
+    )
+    # Use a regular text_input we can programmatically fill (chat_input can't be pre-filled)
+    # We render it normally; CSS makes room for it visually via the pill div above.
+    st.text_input(
+        label="Prompt",
+        key="prompt_text",
+        label_visibility="collapsed",
+        placeholder="Ask anything",
+    )
+    # Render mic; component visually is a single icon. Default behavior: gray -> red when recording.
+    rec = mic_recorder(
+        start_prompt="",
+        stop_prompt="",
+        key="press_mic",
+        just_once=False,
+        format="wav",
+        use_container_width=False
+    )
 
-# 2) Inline mic UI: press & hold to record, release to stop -> auto transcribe/apply
-st.markdown(
-    '<div class="prompt-wrap"><div class="prompt-inner">'
-    '<div class="pill"><div style="opacity:.35;font-size:13px;">Ask anything</div>'
-    '<div class="mic-slot"></div></div></div></div>',
-    unsafe_allow_html=True
+# 2) If user typed and hit Enter, apply it
+# (Streamlit sets session_state['prompt_text'] on change; we detect via a hidden submit flag)
+if "typed_submit" not in st.session_state:
+    st.session_state.typed_submit = False
+
+def _on_typed_submit():
+    st.session_state.typed_submit = True
+
+# Re-render a small invisible input to catch Enter submit (workaround)
+st.text_input(
+    "hidden_submit",
+    value=st.session_state.prompt_text,
+    key="hidden_submit",
+    label_visibility="hidden",
+    disabled=True,
+    on_change=_on_typed_submit,
 )
 
-rec = mic_recorder(
-    start_prompt="Hold to speak",
-    stop_prompt="Release to apply",
-    key="press_mic",
-    just_once=False,
-    format="wav",
-    use_container_width=False
-)
-# rec is None while recording; becomes a dict once released
+if st.session_state.typed_submit:
+    st.session_state.typed_submit = False
+    txt = (st.session_state.prompt_text or "").strip()
+    if txt:
+        _process_and_apply(txt, source_hint="text")
+
+# 3) When a recording finishes: transcribe -> show in prompt -> mark for auto-apply -> rerun
 if rec and isinstance(rec, dict) and rec.get("bytes"):
     wav_bytes = rec["bytes"]
-    # de-dupe repeated reruns for same audio
     fp = (len(wav_bytes), hash(wav_bytes[:1024]))
     if fp != st.session_state.last_audio_fp:
         st.session_state.last_audio_fp = fp
         try:
             with st.spinner("Transcribing…"):
                 transcript = _deepgram_transcribe_bytes(wav_bytes, mimetype="audio/wav")
-            st.session_state.last_transcript = transcript  # <-- log what Deepgram heard
+            st.session_state.last_transcript = transcript  # exact text from Deepgram
+            # 1) write into prompt bar so you SEE it
+            st.session_state.prompt_text = transcript or ""
+            # brief floating preview too
             if transcript:
-                # brief on-screen preview
                 st.markdown(f'<div class="transient">🗣 {transcript}</div>', unsafe_allow_html=True)
-                _process_and_apply(transcript, source_hint="voice/deepgram")
-            else:
-                st.warning("No speech detected.")
+            # 2) mark for auto-apply on next run (after it’s visible)
+            st.session_state.await_apply = bool(transcript)
+            st.session_state.await_apply_source = "voice/deepgram"
+            st.rerun()
         except Exception as e:
             st.error(f"Transcription failed: {e}")
+
+# 4) After the rerun: auto-apply the transcript we just displayed
+if st.session_state.await_apply:
+    st.session_state.await_apply = False  # clear flag before applying, to avoid loops
+    to_send = (st.session_state.prompt_text or "").strip()
+    if to_send:
+        _process_and_apply(to_send, source_hint=st.session_state.await_apply_source or "voice")
+
