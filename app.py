@@ -77,8 +77,27 @@ st.markdown(f"""
 /* Hide Streamlit default footer/menu */
 #MainMenu, footer {{ visibility: hidden; }}
 
+sidebar_display = "block" if st.session_state.filters_open else "none"
+st.markdown("""
+<style>
+/* Hide Streamlit default footer/menu */
+#MainMenu, footer { visibility: hidden; }
+
 /* Sidebar collapsible */
-[data-testid="stSidebar"] {{ display: {sidebar_display}; }}
+[data-testid="stSidebar"] { display: %s; }
+
+/* Leave room for bottom mic area */
+.block-container { padding-top: 6px; padding-bottom: 220px; }
+
+/* Top bar */
+.topbar {
+  position: sticky; top: 0; z-index: 100;
+  background: #fff; border-bottom: 1px solid #eee;
+  padding: 8px 10px; margin-bottom: 6px;
+}
+...
+</style>
+""" % sidebar_display, unsafe_allow_html=True)
 
 /* Leave room for bottom mic area */
 .block-container {{ padding-top: 6px; padding-bottom: 220px; }}
