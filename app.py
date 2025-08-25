@@ -48,23 +48,27 @@ if "filt_machines" not in st.session_state:
 if "cmd_log" not in st.session_state:
     st.session_state.cmd_log = []
 
-# prompt bar text (we control/set this to show transcript)
+# ----- prompt & voice pipeline state -----
 if "prompt_text" not in st.session_state:
-    st.session_state.prompt_text = ""
+    st.session_state.prompt_text = ""           # current visible text in the prompt bar
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None      # text to inject (e.g., transcript) on next render
+if "apply_after_render" not in st.session_state:
+    st.session_state.apply_after_render = False # auto-apply the just-injected prompt (voice)
+if "apply_source" not in st.session_state:
+    st.session_state.apply_source = None
 
-# voice pipeline bookkeeping
+if "typed_submit" not in st.session_state:
+    st.session_state.typed_submit = False       # enter/submit from keyboard
+if "suppress_next_on_change" not in st.session_state:
+    st.session_state.suppress_next_on_change = False  # avoid callback when we inject programmatically
+
 if "last_audio_fp" not in st.session_state:
     st.session_state.last_audio_fp = None
 if "last_transcript" not in st.session_state:
     st.session_state.last_transcript = None
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
-
-# two-step auto-apply: show in prompt first, then apply on next run
-if "await_apply" not in st.session_state:
-    st.session_state.await_apply = False
-if "await_apply_source" not in st.session_state:
-    st.session_state.await_apply_source = None
 
 
 # ============================ CSS / LAYOUT ============================
@@ -78,7 +82,7 @@ st.markdown(f"""
 [data-testid="stSidebar"] {{ display: {sidebar_display}; }}
 
 /* Tighten spacing and leave extra room for bottom prompt bar */
-.block-container {{ padding-top: 6px; padding-bottom: 112px; }}
+.block-container {{ padding-top: 6px; padding-bottom: 124px; }}
 
 /* Top bar */
 .topbar {{
@@ -94,24 +98,45 @@ st.markdown(f"""
 }}
 .topbar .btn:hover {{ opacity: 0.9; }}
 
-/* Bottom prompt bar (ChatGPT-style) */
+/* Bottom prompt bar (single bar) */
 .prompt-wrap {{
   position: fixed; left: 24px; right: 24px; bottom: 20px; z-index: 1000;
 }}
 .prompt-inner {{
-  display: grid; grid-template-columns: 1fr 44px; align-items: center; gap: 10px;
+  position: relative;
+  max-width: 1080px; margin: 0 auto;
 }}
-.prompt-pill {{
-  background: #fff; border: 1px solid #e6e6e6; border-radius: 28px;
-  padding: 6px 12px;
+/* The actual input sits inside this container, we overlay the mic on the right */
+.prompt-container {{
+  position: relative;
 }}
-/* position the mic icon as if it's inside the right edge of the pill */
-.mic-overlay {{
-  position: relative; width: 44px; height: 44px;
+/* Make the text_input look like a pill */
+.prompt-container input[type="text"] {{
+  border-radius: 28px !important;
+  padding-right: 52px !important; /* room for mic */
+  height: 44px;
 }}
-.mic-overlay .st-emotion-cache-0 {{  /* try to keep mic visually tight */
-  position: absolute; right: 0; top: 0;
+
+/* Mic button overlay (single icon) */
+.mic-btn {{
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  background: #f3f3f3;
+  border: 1px solid #e5e5e5;
+  z-index: 10;
 }}
+/* When recording we make the background red-ish; the component itself shows the icon */
+.mic-recording {{
+  background: #ffebeb !important;
+  border-color: #ffb3b3 !important;
+}}
+
 /* tiny floating transcript preview */
 .transient {{
   position: fixed; right: 24px; bottom: 74px; background: #111; color:#fff;
@@ -549,60 +574,64 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
         st.error(f"⚠️ Error: {e}")
 
 
-# ============================ BOTTOM PROMPT BAR + INLINE MIC =========================
-# 1) Render the prompt bar: our own text input we control
-prompt_placeholder = st.empty()
-with prompt_placeholder.container():
-    st.markdown(
-        '<div class="prompt-wrap"><div class="prompt-inner">'
-        '<div class="prompt-pill"></div>'
-        '<div class="mic-overlay"></div>'
-        '</div></div>',
-        unsafe_allow_html=True
-    )
-    # Use a regular text_input we can programmatically fill (chat_input can't be pre-filled)
-    # We render it normally; CSS makes room for it visually via the pill div above.
+# ============================ PROMPT BAR + INLINE MIC =========================
+# Inject transcript BEFORE rendering the input, so we won't mutate widget state after instantiation
+if st.session_state.pending_prompt is not None:
+    st.session_state.suppress_next_on_change = True  # don't treat this as user typing
+    st.session_state.prompt_text = st.session_state.pending_prompt
+    st.session_state.pending_prompt = None
+    # mark to auto-apply (voice) after we render this run
+    st.session_state.apply_after_render = True
+
+# Handle typing: when user presses Enter, on_change fires and we set typed_submit=True
+def _on_prompt_change():
+    if st.session_state.get("suppress_next_on_change"):
+        # Swallow the change that came from us injecting the transcript
+        st.session_state.suppress_next_on_change = False
+        return
+    st.session_state.typed_submit = True
+
+# Single prompt bar (no duplicates)
+prompt_area = st.container()
+with prompt_area:
+    st.markdown('<div class="prompt-wrap"><div class="prompt-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="prompt-container">', unsafe_allow_html=True)
+
+    # Our single text input (looks like a chat bar). Using session_state["prompt_text"] for value.
     st.text_input(
         label="Prompt",
         key="prompt_text",
         label_visibility="collapsed",
-        placeholder="Ask anything",
-    )
-    # Render mic; component visually is a single icon. Default behavior: gray -> red when recording.
-    rec = mic_recorder(
-        start_prompt="",
-        stop_prompt="",
-        key="press_mic",
-        just_once=False,
-        format="wav",
-        use_container_width=False
+        placeholder="Ask anything…",
+        on_change=_on_prompt_change,      # Enter = submit
     )
 
-# 2) If user typed and hit Enter, apply it
-# (Streamlit sets session_state['prompt_text'] on change; we detect via a hidden submit flag)
-if "typed_submit" not in st.session_state:
-    st.session_state.typed_submit = False
+    # Overlay mic icon (single icon component). It appears inside the input on the right.
+    mic_box = st.container()
+    with mic_box:
+        st.markdown(
+            f'<div class="mic-btn {"mic-recording" if st.session_state.get("mic_is_recording") else ""}"></div>',
+            unsafe_allow_html=True
+        )
+        # The component returns a dict when recording ends (on release)
+        rec = mic_recorder(
+            start_prompt="", stop_prompt="",
+            key="press_mic",
+            just_once=False,
+            format="wav",
+            use_container_width=False
+        )
+    st.markdown('</div>', unsafe_allow_html=True)   # close prompt-container
+    st.markdown('</div></div>', unsafe_allow_html=True)  # close prompt-wrap/inner
 
-def _on_typed_submit():
-    st.session_state.typed_submit = True
-
-# Re-render a small invisible input to catch Enter submit (workaround)
-st.text_input(
-    "hidden_submit",
-    value=st.session_state.prompt_text,
-    key="hidden_submit",
-    label_visibility="hidden",
-    disabled=True,
-    on_change=_on_typed_submit,
-)
-
+# When user presses Enter (typed)
 if st.session_state.typed_submit:
     st.session_state.typed_submit = False
     txt = (st.session_state.prompt_text or "").strip()
     if txt:
         _process_and_apply(txt, source_hint="text")
 
-# 3) When a recording finishes: transcribe -> show in prompt -> mark for auto-apply -> rerun
+# When a recording finishes: transcribe -> store transcript to inject next render
 if rec and isinstance(rec, dict) and rec.get("bytes"):
     wav_bytes = rec["bytes"]
     fp = (len(wav_bytes), hash(wav_bytes[:1024]))
@@ -612,22 +641,22 @@ if rec and isinstance(rec, dict) and rec.get("bytes"):
             with st.spinner("Transcribing…"):
                 transcript = _deepgram_transcribe_bytes(wav_bytes, mimetype="audio/wav")
             st.session_state.last_transcript = transcript  # exact text from Deepgram
-            # 1) write into prompt bar so you SEE it
-            st.session_state.prompt_text = transcript or ""
-            # brief floating preview too
+
+            # 1) DO NOT mutate prompt_text now (widget already rendered). Instead:
+            st.session_state.pending_prompt = transcript or ""
+
+            # 2) Show small preview
             if transcript:
                 st.markdown(f'<div class="transient">🗣 {transcript}</div>', unsafe_allow_html=True)
-            # 2) mark for auto-apply on next run (after it’s visible)
-            st.session_state.await_apply = bool(transcript)
-            st.session_state.await_apply_source = "voice/deepgram"
+
+            # Trigger a rerun. Next run will inject transcript before rendering the widget.
             st.rerun()
         except Exception as e:
             st.error(f"Transcription failed: {e}")
 
-# 4) After the rerun: auto-apply the transcript we just displayed
-if st.session_state.await_apply:
-    st.session_state.await_apply = False  # clear flag before applying, to avoid loops
+# After render (this run), if we had injected a transcript, apply it automatically
+if st.session_state.apply_after_render:
+    st.session_state.apply_after_render = False
     to_send = (st.session_state.prompt_text or "").strip()
     if to_send:
-        _process_and_apply(to_send, source_hint=st.session_state.await_apply_source or "voice")
-
+        _process_and_apply(to_send, source_hint=st.session_state.apply_source or "voice/deepgram")
