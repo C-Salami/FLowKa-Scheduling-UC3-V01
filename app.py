@@ -73,13 +73,14 @@ if "last_extraction" not in st.session_state:
 
 # ============================ CSS / LAYOUT ============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
-st.markdown("""
+
+css = """
 <style>
 /* Hide Streamlit default footer/menu */
 #MainMenu, footer { visibility: hidden; }
 
 /* Sidebar collapsible */
-[data-testid="stSidebar"] { display: %s; }
+[data-testid="stSidebar"] { display: SIDEBAR_DISPLAY_VALUE; }
 
 /* Leave room for bottom mic area */
 .block-container { padding-top: 6px; padding-bottom: 220px; }
@@ -155,7 +156,9 @@ st.markdown("""
 }
 .placeholder { color:#888; }
 </style>
-""" % sidebar_display, unsafe_allow_html=True)
+"""
+css = css.replace("SIDEBAR_DISPLAY_VALUE", sidebar_display)
+st.markdown(css, unsafe_allow_html=True)
 
 
 # ============================ TOP BAR ============================
