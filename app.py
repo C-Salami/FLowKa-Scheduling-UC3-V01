@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# Press-and-hold microphone component (logic unchanged)
+# Press-and-hold microphone component
 from streamlit_mic_recorder import mic_recorder
 
 
@@ -70,13 +70,8 @@ if "last_transcript" not in st.session_state:
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
 
-# ============================ CSS / LAYOUT ============================
-sidebar_display = "block" if st.session_state.filters_open else "none"
-st.markdown(f"""
-<style>
-/* Hide Streamlit default footer/menu */
-#MainMenu, footer {{ visibility: hidden; }}
 
+# ============================ CSS / LAYOUT ============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
 st.markdown("""
 <style>
@@ -95,43 +90,28 @@ st.markdown("""
   background: #fff; border-bottom: 1px solid #eee;
   padding: 8px 10px; margin-bottom: 6px;
 }
-...
-</style>
-""" % sidebar_display, unsafe_allow_html=True)
-
-/* Leave room for bottom mic area */
-.block-container {{ padding-top: 6px; padding-bottom: 220px; }}
-
-/* Top bar */
-.topbar {{
-  position: sticky; top: 0; z-index: 100;
-  background: #fff; border-bottom: 1px solid #eee;
-  padding: 8px 10px; margin-bottom: 6px;
-}}
-.topbar .inner {{ display: flex; justify-content: space-between; align-items: center; }}
-.topbar .title {{ font-weight: 600; font-size: 16px; }}
-.topbar .btn {{
+.topbar .inner { display: flex; justify-content: space-between; align-items: center; }
+.topbar .title { font-weight: 600; font-size: 16px; }
+.topbar .btn {
   background: #000; color: #fff; border: none; border-radius: 8px;
   padding: 6px 12px; font-weight: 600; cursor: pointer;
-}}
-.topbar .btn:hover {{ opacity: 0.9; }}
+}
+.topbar .btn:hover { opacity: 0.9; }
 
 /* Bottom mic area */
-.bottom-wrap {{
+.bottom-wrap {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
   background: linear-gradient(to top, rgba(255,255,255,0.98), rgba(255,255,255,0.65));
   padding: 20px 0 28px 0;
-}}
-.bottom-inner {{
+}
+.bottom-inner {
   max-width: 980px; margin: 0 auto; padding: 0 24px;
   display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 18px;
-}}
+}
 
-/* --- Pretty mic button (our own visuals) --- */
-.mic-holder {{
-  position: relative; width: 68px; height: 68px;
-}}
-.mic-btn {{
+/* --- Pretty mic button (our visuals) --- */
+.mic-holder { position: relative; width: 68px; height: 68px; }
+.mic-btn {
   position: absolute; inset: 0;
   border-radius: 999px;
   background: radial-gradient(ellipse at 30% 30%, #ffffff 0%, #f6f6f6 60%, #efefef 100%);
@@ -141,10 +121,10 @@ st.markdown("""
   transition: transform .08s ease, box-shadow .2s ease, border-color .2s ease;
   cursor: pointer;
 }
-.mic-btn:hover {{ transform: translateY(-1px); box-shadow: 0 8px 24px rgba(0,0,0,0.14), inset 0 1px 0 rgba(255,255,255,0.9); }}
-.mic-btn:active {{ transform: translateY(0px) scale(0.98); }}
+.mic-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(0,0,0,0.14), inset 0 1px 0 rgba(255,255,255,0.9); }
+.mic-btn:active { transform: translateY(0px) scale(0.98); }
 
-.mic-icon {{
+.mic-icon {
   width: 28px; height: 28px;
   background: #111; -webkit-mask: url('data:image/svg+xml;utf8,\
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
@@ -152,20 +132,19 @@ st.markdown("""
           mask: url('data:image/svg+xml;utf8,\
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
   <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
-}}
-/* Pulse ring shown while pointer is down (visual feedback) */
-.mic-btn:active::after {{
+}
+
+/* Pulse ring while pressing */
+.mic-btn:active::after {
   content: ""; position: absolute; inset: -10px; border-radius: 999px;
   box-shadow: 0 0 0 6px rgba(255,0,0,0.18);
-}}
+}
 
 /* The actual recorder element sits over the button but invisible */
-.mic-hotspot {{
-  position: absolute; inset: 0; opacity: 0;  /* capture clicks/hold */
-}}
+.mic-hotspot { position: absolute; inset: 0; opacity: 0; }
 
-/* Transcript box (unchanged, slightly tighter) */
-.transcript-box {{
+/* Transcript box */
+.transcript-box {
   min-height: 48px;
   border: 1px dashed #e2e2e2;
   border-radius: 12px;
@@ -173,10 +152,11 @@ st.markdown("""
   background: #fbfbfb;
   font-size: 14px;
   color: #333;
-}}
-.placeholder {{ color:#888; }}
+}
+.placeholder { color:#888; }
 </style>
-""", unsafe_allow_html=True)
+""" % sidebar_display, unsafe_allow_html=True)
+
 
 # ============================ TOP BAR ============================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
@@ -186,6 +166,7 @@ if st.button(toggle_label, key="toggle_filters_btn"):
     st.session_state.filters_open = not st.session_state.filters_open
     st.rerun()
 st.markdown('</div></div>', unsafe_allow_html=True)
+
 
 # ============================ SIDEBAR FILTERS =========================
 if st.session_state.filters_open:
@@ -229,10 +210,12 @@ if st.session_state.filters_open:
             else:
                 st.caption("No commands yet.")
 
+
 # ============================ EFFECTIVE FILTERS =========================
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
+
 
 # ============================ ORDER NAME HELPERS =========================
 UNITS = {
@@ -266,6 +249,7 @@ def normalize_order_name(text: str) -> str | None:
         digits = re.findall(r"\d+", token)
         if digits: n = int(digits[-1])
     return f"Order {n}" if n is not None else None
+
 
 # ============================ NLP / INTENT =========================
 INTENT_SCHEMA = {
@@ -478,6 +462,7 @@ def validate_intent(payload: dict, orders_df, sched_df):
 
     return False, "Invalid payload"
 
+
 # ============================ APPLY FUNCTIONS =========================
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
     machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
@@ -518,6 +503,7 @@ def apply_swap(schedule_df: pd.DataFrame, a: str, b: str):
     s = apply_delay(s, a, days=da.days, hours=da.seconds // 3600, minutes=(da.seconds % 3600)//60)
     s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600, minutes=(db.seconds % 3600)//60)
     return s
+
 
 # ============================ GANTT =========================
 sched = st.session_state.schedule_df.copy()
@@ -572,6 +558,7 @@ else:
     )
     st.altair_chart(gantt, use_container_width=True)
 
+
 # ============================ DEEPGRAM (bytes) =========================
 def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") -> str:
     key = os.getenv("DEEPGRAM_API_KEY")
@@ -590,6 +577,7 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
         return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
     except Exception:
         raise RuntimeError(f"Deepgram: no transcript in response: {j}")
+
 
 # ============================ PIPELINE (shared) =========================
 def _process_and_apply(cmd_text: str, *, source_hint: str = None):
@@ -652,6 +640,7 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
     except Exception as e:
         st.error(f"⚠️ Error: {e}")
 
+
 # ============================ BOTTOM MIC (no prompt bar) =========================
 with st.container():
     st.markdown('<div class="bottom-wrap"><div class="bottom-inner">', unsafe_allow_html=True)
@@ -669,7 +658,6 @@ with st.container():
     )
 
     # Invisible hotspot on top that actually records
-    # (We keep it in the same container so it covers the mic button perfectly.)
     hotspot = st.container()
     with hotspot:
         st.markdown('<div class="mic-hotspot">', unsafe_allow_html=True)
