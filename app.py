@@ -12,7 +12,6 @@ import altair as alt
 # Single-icon, press-and-hold microphone component
 from streamlit_mic_recorder import mic_recorder
 
-
 # ============================ PAGE & SECRETS ============================
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
 
@@ -22,7 +21,6 @@ for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
         os.environ[k] = os.environ.get(k) or st.secrets[k]
     except Exception:
         pass  # ok
-
 
 # ============================ DATA LOADING =============================
 @st.cache_data
@@ -70,7 +68,6 @@ if "last_transcript" not in st.session_state:
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
 
-
 # ============================ CSS / LAYOUT ============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
 st.markdown(f"""
@@ -82,7 +79,7 @@ st.markdown(f"""
 [data-testid="stSidebar"] {{ display: {sidebar_display}; }}
 
 /* Tighten spacing and leave extra room for bottom prompt bar */
-.block-container {{ padding-top: 6px; padding-bottom: 124px; }}
+.block-container {{ padding-top: 6px; padding-bottom: 132px; }}
 
 /* Top bar */
 .topbar {{
@@ -102,49 +99,48 @@ st.markdown(f"""
 .prompt-wrap {{
   position: fixed; left: 24px; right: 24px; bottom: 20px; z-index: 1000;
 }}
-.prompt-inner {{
-  position: relative;
-  max-width: 1080px; margin: 0 auto;
-}}
-/* The actual input sits inside this container, we overlay the mic on the right */
-.prompt-container {{
-  position: relative;
-}}
-/* Make the text_input look like a pill */
+.prompt-inner {{ max-width: 1080px; margin: 0 auto; }}
+.prompt-container {{ position: relative; }}
+
+/* Make the text_input look like a clean pill */
 .prompt-container input[type="text"] {{
   border-radius: 28px !important;
-  padding-right: 52px !important; /* room for mic */
-  height: 44px;
+  padding-right: 56px !important; /* room for mic */
+  height: 48px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.06);
 }}
 
-/* Mic button overlay (single icon) */
+/* Mic button overlay (single icon, clearly visible) */
 .mic-btn {{
   position: absolute;
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 999px;
   display: flex; align-items: center; justify-content: center;
-  background: #f3f3f3;
+  background: #ffffff;
   border: 1px solid #e5e5e5;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.08);
   z-index: 10;
 }}
-/* When recording we make the background red-ish; the component itself shows the icon */
+/* Optional subtle hover */
+.mic-btn:hover {{ box-shadow: 0 2px 10px rgba(0,0,0,0.12); }}
+
+/* When recording: slight red glow */
 .mic-recording {{
-  background: #ffebeb !important;
+  box-shadow: 0 0 0 3px rgba(255,0,0,0.15), 0 2px 10px rgba(255,0,0,0.25) !important;
   border-color: #ffb3b3 !important;
 }}
 
 /* tiny floating transcript preview */
 .transient {{
-  position: fixed; right: 24px; bottom: 74px; background: #111; color:#fff;
+  position: fixed; right: 24px; bottom: 80px; background: #111; color:#fff;
   padding: 8px 12px; border-radius: 10px; font-size: 12px; opacity: .92;
 }}
 </style>
 """, unsafe_allow_html=True)
-
 
 # ============================ TOP BAR ============================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
@@ -154,7 +150,6 @@ if st.button(toggle_label, key="toggle_filters_btn"):
     st.session_state.filters_open = not st.session_state.filters_open
     st.rerun()
 st.markdown('</div></div>', unsafe_allow_html=True)
-
 
 # ============================ SIDEBAR FILTERS =========================
 if st.session_state.filters_open:
@@ -199,20 +194,55 @@ if st.session_state.filters_open:
             else:
                 st.caption("No commands yet.")
 
-
 # ============================ EFFECTIVE FILTERS =========================
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
+# ============================ ORDER NAME HELPERS =========================
+# Accept "Order 5", "order five", "order #12", "Order twelve"
+UNITS = {
+    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,
+    "ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
+    "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19
+}
+TENS = {"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90}
+
+def words_to_int(s: str) -> int | None:
+    s = s.lower().strip().replace("-", " ")
+    if s in UNITS: return UNITS[s]
+    if s in TENS: return TENS[s]
+    # "twenty one"
+    parts = s.split()
+    if len(parts) == 2 and parts[0] in TENS and parts[1] in UNITS:
+        return TENS[parts[0]] + UNITS[parts[1]]
+    # digits
+    if re.fullmatch(r"\d{1,4}", s):
+        return int(s)
+    return None
+
+def normalize_order_name(text: str) -> str | None:
+    """
+    Extract order identifier from text and normalize to 'Order N'
+    """
+    m = re.search(r"\border\s*(?:#\s*)?([A-Za-z\-]+|\d{1,4})\b", text, flags=re.I)
+    if not m:
+        return None
+    token = m.group(1)
+    n = words_to_int(token)
+    if n is None:  # maybe token like 'o012' sneaks in -> strip non-digits
+        digits = re.findall(r"\d+", token)
+        if digits:
+            n = int(digits[-1])
+    return f"Order {n}" if n is not None else None
 
 # ============================ NLP / INTENT =========================
 INTENT_SCHEMA = {
   "type": "object",
   "properties": {
     "intent": {"type": "string", "enum": ["delay_order", "move_order", "swap_orders"]},
-    "order_id": {"type": "string", "pattern": "^O\\d{3}$"},
-    "order_id_2": {"type": "string", "pattern": "^O\\d{3}$"},
+    "order_id": {"type": "string"},          # now like "Order 12"
+    "order_id_2": {"type": "string"},
     "days": {"type": "number"},
     "hours": {"type": "number"},
     "minutes": {"type": "number"},
@@ -228,29 +258,19 @@ INTENT_SCHEMA = {
 DEFAULT_TZ = "Asia/Makassar"
 TZ = pytz.timezone(DEFAULT_TZ)
 
-NUM_WORDS = {
-    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,
-    "six":6,"seven":7,"eight":8,"nine":9,"ten":10,
-    "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
-    "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19,"twenty":20
-}
-def _num_token_to_float(tok: str):
-    t = tok.strip().lower().replace("-", " ").replace(",", ".")
-    try:
-        return float(t)
-    except Exception:
-        pass
-    parts = [p for p in t.split() if p]
-    if len(parts) == 1 and parts[0] in NUM_WORDS:
-        return float(NUM_WORDS[parts[0]])
-    if len(parts) == 2 and parts[0] in NUM_WORDS and parts[1] in NUM_WORDS:
-        return float(NUM_WORDS[parts[0]] + NUM_WORDS[parts[1]])
-    return None
-
 def _parse_duration_chunks(text: str):
     d = {"days":0.0,"hours":0.0,"minutes":0.0}
-    for num, unit in re.findall(r"([\d\.,]+|\b\w+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
-        n = _num_token_to_float(num)
+    def numtok(tok: str):
+        tok = tok.strip().lower().replace(",", ".").replace("-", " ")
+        try:
+            return float(tok)
+        except Exception:
+            pass
+        val = words_to_int(tok)
+        return float(val) if val is not None else None
+
+    for num, unit in re.findall(r"([\d\.,]+|\b[\w\-]+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
+        n = numtok(num)
         if n is None: continue
         u = unit.lower()
         if u.startswith("d"): d["days"] += n
@@ -258,6 +278,7 @@ def _parse_duration_chunks(text: str):
         else: d["minutes"] += n
     return d
 
+# ---------- Extraction via OpenAI (kept, but we sanitize IDs to 'Order N') ----------
 def _extract_with_openai(user_text: str):
     from openai import OpenAI
     if not os.getenv("OPENAI_API_KEY"):
@@ -267,29 +288,33 @@ def _extract_with_openai(user_text: str):
         "You normalize factory scheduling edit commands for a Gantt. "
         "Return ONLY JSON matching the given schema. "
         "Supported intents: delay_order, move_order, swap_orders. "
-        "Order IDs look like O021 (3 digits). "
+        "Order IDs are of the form 'Order N' (e.g., 'Order 12'). "
         "If user says 'tomorrow' etc., convert to ISO date in Asia/Makassar. "
         "If time missing on move_order, default 08:00. "
-        "If delay units missing, assume days; minutes allowed."
+        "If delay units missing, assume days; minutes allowed. "
+        "If user mentions 'order five', resolve to 'Order 5'."
     )
-    USER_GUIDE = (
-        '1) "delay O021 one day" -> {"intent":"delay_order","order_id":"O021","days":1}\n'
-        '2) "push order O009 by 1h 30m" -> {"intent":"delay_order","order_id":"O009","hours":1.0,"minutes":30.0}\n'
-        '3) "move o014 to Aug 30 09:13" -> {"intent":"move_order","order_id":"O014","date":"2025-08-30","time":"09:13"}\n'
-        '4) "swap o027 with o031" -> {"intent":"swap_orders","order_id":"O027","order_id_2":"O031"}\n'
-        '5) "advance O008 by two days" -> {"intent":"delay_order","order_id":"O008","days":-2}\n'
+    GUIDE = (
+        '1) "delay order five one day" -> {"intent":"delay_order","order_id":"Order 5","days":1}\n'
+        '2) "push order 9 by 1h 30m" -> {"intent":"delay_order","order_id":"Order 9","hours":1.0,"minutes":30.0}\n'
+        '3) "move order twelve to Aug 30 09:13" -> {"intent":"move_order","order_id":"Order 12","date":"2025-08-30","time":"09:13"}\n'
+        '4) "swap order 2 with order 3" -> {"intent":"swap_orders","order_id":"Order 2","order_id_2":"Order 3"}\n'
+        '5) "advance order 8 by two days" -> {"intent":"delay_order","order_id":"Order 8","days":-2}\n'
     )
     resp = client.responses.create(
         model="gpt-5.1",
-        input=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": USER_GUIDE},
-            {"role": "user", "content": user_text},
-        ],
-        response_format={"type": "json_schema", "json_schema": {"name": "Edit", "schema": INTENT_SCHEMA}},
+        input=[{"role":"system","content":SYSTEM},{"role":"user","content":GUIDE},{"role":"user","content":user_text}],
+        response_format={"type":"json_schema","json_schema":{"name":"Edit","schema":INTENT_SCHEMA}}
     )
     text = resp.output[0].content[0].text
     data = json.loads(text)
+
+    # sanitize order_id fields that may come back as "order five"
+    for k in ("order_id", "order_id_2"):
+        if k in data and isinstance(data[k], str):
+            norm = normalize_order_name(data[k])
+            if norm: data[k] = norm
+
     data["_source"] = "openai"
     return data
 
@@ -297,12 +322,18 @@ def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    # SWAP
-    m = re.search(r"(?:^|\b)(swap|switch)\s+(o\d{3})\s*(?:with|and|&)?\s*(o\d{3})\b", low)
+    # SWAP: "swap order 2 with order 3"
+    m = re.search(r"(?:^|\b)(swap|switch)\s+(order[^,;]*)", low)
     if m:
-        return {"intent":"swap_orders","order_id":m.group(2).upper(),"order_id_2":m.group(3).upper(),"_source":"regex"}
+        # try to find two order mentions
+        ids = re.findall(r"\border\s*(?:#\s*)?([A-Za-z\-]+|\d{1,4})\b", low, flags=re.I)
+        if len(ids) >= 2:
+            a = normalize_order_name(f"order {ids[0]}")
+            b = normalize_order_name(f"order {ids[1]}")
+            if a and b and a != b:
+                return {"intent": "swap_orders", "order_id": a, "order_id_2": b, "_source": "regex"}
 
-    # DELAY +/- (advance = negative)
+    # DELAY (delay/push/postpone vs. advance/bring forward)
     delay_sign = +1
     if re.search(r"\b(advance|bring\s+forward|pull\s+in)\b", low):
         delay_sign = -1
@@ -310,36 +341,60 @@ def _regex_fallback(user_text: str):
     else:
         low_norm = low
 
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?\bby\b\s+(.+)$", low_norm)
-    if m:
-        oid = m.group(2).upper()
-        dur = _parse_duration_chunks(m.group(3))
-        if any(v!=0 for v in dur.values()):
-            return {"intent":"delay_order","order_id":oid,
-                    "days":delay_sign*dur["days"],"hours":delay_sign*dur["hours"],
-                    "minutes":delay_sign*dur["minutes"],"_source":"regex"}
+    # Identify target order
+    target = normalize_order_name(low_norm)
 
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
-    if m:
-        oid = m.group(2).upper()
+    # by <duration>
+    m = re.search(r"\b(delay|push|postpone)\b.*?\bby\b\s+(.+)$", low_norm)
+    if target and m:
+        dur = _parse_duration_chunks(m.group(2))
+        if any(v != 0 for v in dur.values()):
+            return {
+                "intent": "delay_order",
+                "order_id": target,
+                "days": delay_sign * dur["days"],
+                "hours": delay_sign * dur["hours"],
+                "minutes": delay_sign * dur["minutes"],
+                "_source": "regex",
+            }
+
+    # implicit duration e.g. "delay order 7 two days"
+    m = re.search(r"\b(delay|push|postpone)\b.*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
+    if target and m:
         dur = _parse_duration_chunks(low_norm)
-        if any(v!=0 for v in dur.values()):
-            return {"intent":"delay_order","order_id":oid,
-                    "days":delay_sign*dur["days"],"hours":delay_sign*dur["hours"],
-                    "minutes":delay_sign*dur["minutes"],"_source":"regex"}
+        if any(v != 0 for v in dur.values()):
+            return {
+                "intent": "delay_order",
+                "order_id": target,
+                "days": delay_sign * dur["days"],
+                "hours": delay_sign * dur["hours"],
+                "minutes": delay_sign * dur["minutes"],
+                "_source": "regex",
+            }
 
-    m = re.search(r"(move|set|schedule)\s+(o\d{3})\s+(to|on)\s+(.+)", low)
+    # MOVE: "move order 12 to/on <datetime>"
+    m = re.search(r"\b(move|set|schedule)\b.*?\b(to|on)\s+(.+)", low)
     if m:
-        oid = m.group(2).upper(); when = m.group(4)
-        try:
-            dt = dtp.parse(when, fuzzy=True)
-            return {"intent":"move_order","order_id":oid,"date":dt.date().isoformat(),"time":dt.strftime("%H:%M"),"_source":"regex"}
-        except Exception:
-            pass
+        target = target or normalize_order_name(low)
+        when = m.group(3) if len(m.groups()) >= 3 else None
+        if target and when:
+            try:
+                dt = dtp.parse(when, fuzzy=True)
+                return {
+                    "intent": "move_order",
+                    "order_id": target,
+                    "date": dt.date().isoformat(),
+                    "time": dt.strftime("%H:%M"),
+                    "_source": "regex",
+                }
+            except Exception:
+                pass
 
-    m = re.search(r"(delay|push|postpone)\s+(o\d{3}).*\b(one)\s+day\b", low)
-    if m: return {"intent":"delay_order","order_id":m.group(2).upper(),"days":1,"_source":"regex"}
-    return {"intent":"unknown","raw":user_text,"_source":"regex"}
+    # simple fallback: "delay order one day"
+    if target and re.search(r"\b(delay|push|postpone)\b.*\bone day\b", low):
+        return {"intent": "delay_order", "order_id": target, "days": 1, "_source": "regex"}
+
+    return {"intent": "unknown", "raw": user_text, "_source": "regex"}
 
 def extract_intent(user_text: str) -> dict:
     try:
@@ -400,7 +455,6 @@ def validate_intent(payload: dict, orders_df, sched_df):
 
     return False, "Invalid payload"
 
-
 # ============================ APPLY FUNCTIONS =========================
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
     machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
@@ -442,7 +496,6 @@ def apply_swap(schedule_df: pd.DataFrame, a: str, b: str):
     s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600, minutes=(db.seconds % 3600)//60)
     return s
 
-
 # ============================ GANTT =========================
 sched = st.session_state.schedule_df.copy()
 sched = sched[sched["wheel_type"].isin(wheel_choice)]
@@ -470,7 +523,16 @@ else:
             alt.value("#dcdcdc"),
         ),
         opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.25)),
-        tooltip=["order_id","operation","sequence","machine","start","end","due_date","wheel_type"],
+        tooltip=[
+            alt.Tooltip("order_id:N", title="Order"),
+            alt.Tooltip("operation:N", title="Operation"),
+            alt.Tooltip("sequence:Q", title="Seq"),
+            alt.Tooltip("machine:N", title="Machine"),
+            alt.Tooltip("start:T", title="Start"),
+            alt.Tooltip("end:T", title="End"),
+            alt.Tooltip("due_date:T", title="Due"),
+            alt.Tooltip("wheel_type:N", title="Wheel"),
+        ],
     )
     labels = alt.Chart(sched).mark_text(
         align="left", dx=6, baseline="middle", fontSize=10, color="white"
@@ -486,7 +548,6 @@ else:
         .configure_view(stroke=None)
     )
     st.altair_chart(gantt, use_container_width=True)
-
 
 # ============================ DEEPGRAM (bytes) =========================
 def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") -> str:
@@ -506,7 +567,6 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
         return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
     except Exception:
         raise RuntimeError(f"Deepgram: no transcript in response: {j}")
-
 
 # ============================ PIPELINE (shared) =========================
 def _process_and_apply(cmd_text: str, *, source_hint: str = None):
@@ -573,47 +633,38 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
     except Exception as e:
         st.error(f"⚠️ Error: {e}")
 
-
 # ============================ PROMPT BAR + INLINE MIC =========================
-# Inject transcript BEFORE rendering the input, so we won't mutate widget state after instantiation
+# Inject transcript BEFORE rendering the input
 if st.session_state.pending_prompt is not None:
-    st.session_state.suppress_next_on_change = True  # don't treat this as user typing
+    st.session_state.suppress_next_on_change = True
     st.session_state.prompt_text = st.session_state.pending_prompt
     st.session_state.pending_prompt = None
-    # mark to auto-apply (voice) after we render this run
     st.session_state.apply_after_render = True
+    st.session_state.apply_source = "voice/deepgram"
 
-# Handle typing: when user presses Enter, on_change fires and we set typed_submit=True
 def _on_prompt_change():
     if st.session_state.get("suppress_next_on_change"):
-        # Swallow the change that came from us injecting the transcript
         st.session_state.suppress_next_on_change = False
         return
     st.session_state.typed_submit = True
 
 # Single prompt bar (no duplicates)
-prompt_area = st.container()
-with prompt_area:
-    st.markdown('<div class="prompt-wrap"><div class="prompt-inner">', unsafe_allow_html=True)
-    st.markdown('<div class="prompt-container">', unsafe_allow_html=True)
+with st.container():
+    st.markdown('<div class="prompt-wrap"><div class="prompt-inner"><div class="prompt-container">', unsafe_allow_html=True)
 
-    # Our single text input (looks like a chat bar). Using session_state["prompt_text"] for value.
     st.text_input(
         label="Prompt",
         key="prompt_text",
         label_visibility="collapsed",
         placeholder="Ask anything…",
-        on_change=_on_prompt_change,      # Enter = submit
+        on_change=_on_prompt_change,
     )
 
-    # Overlay mic icon (single icon component). It appears inside the input on the right.
-    mic_box = st.container()
-    with mic_box:
-        st.markdown(
-            f'<div class="mic-btn {"mic-recording" if st.session_state.get("mic_is_recording") else ""}"></div>',
-            unsafe_allow_html=True
-        )
-        # The component returns a dict when recording ends (on release)
+    # Overlay mic icon (component renders in place; we wrap it for better visuals)
+    mic_wrap = st.container()
+    with mic_wrap:
+        # We can add / remove class 'mic-recording' later if you want explicit state toggling
+        st.markdown('<div class="mic-btn" id="mic-btn"></div>', unsafe_allow_html=True)
         rec = mic_recorder(
             start_prompt="", stop_prompt="",
             key="press_mic",
@@ -621,8 +672,8 @@ with prompt_area:
             format="wav",
             use_container_width=False
         )
-    st.markdown('</div>', unsafe_allow_html=True)   # close prompt-container
-    st.markdown('</div></div>', unsafe_allow_html=True)  # close prompt-wrap/inner
+
+    st.markdown('</div></div></div>', unsafe_allow_html=True)  # close prompt containers
 
 # When user presses Enter (typed)
 if st.session_state.typed_submit:
@@ -642,19 +693,15 @@ if rec and isinstance(rec, dict) and rec.get("bytes"):
                 transcript = _deepgram_transcribe_bytes(wav_bytes, mimetype="audio/wav")
             st.session_state.last_transcript = transcript  # exact text from Deepgram
 
-            # 1) DO NOT mutate prompt_text now (widget already rendered). Instead:
+            # Do not mutate the input now; set pending and rerun
             st.session_state.pending_prompt = transcript or ""
-
-            # 2) Show small preview
             if transcript:
                 st.markdown(f'<div class="transient">🗣 {transcript}</div>', unsafe_allow_html=True)
-
-            # Trigger a rerun. Next run will inject transcript before rendering the widget.
             st.rerun()
         except Exception as e:
             st.error(f"Transcription failed: {e}")
 
-# After render (this run), if we had injected a transcript, apply it automatically
+# After render, if we injected a transcript, apply it automatically
 if st.session_state.apply_after_render:
     st.session_state.apply_after_render = False
     to_send = (st.session_state.prompt_text or "").strip()
