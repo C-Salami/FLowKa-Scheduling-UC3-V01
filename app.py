@@ -131,18 +131,13 @@ css = """
 .rec-wrap input[type="checkbox"], .rec-wrap label { display: none !important; }
 
 /* Replace inner text with a mic glyph using a pseudo element (minimal) */
+
 .rec-wrap button::before, .rec-wrap [role="button"]::before {
   content: "";
-  display: block; width: 24px; height: 24px; margin: 0 auto;
-  background: #111;
-  -webkit-mask: url('data:image/svg+xml;utf8,\
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
-  <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
-          mask: url('data:image/svg+xml;utf8,\
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
-  <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
+  display: block;
+  width: 28px; height: 28px; margin: 0 auto;
+  background: url('assets/mic.png') center/contain no-repeat;
 }
-
 /* Transcript box */
 .transcript-box {
   min-height: 44px;
