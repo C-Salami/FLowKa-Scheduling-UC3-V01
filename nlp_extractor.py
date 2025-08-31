@@ -93,6 +93,15 @@ def _regex_fallback(user_text: str):
         return {"intent":"delay_order","order_id":m.group(2).upper(),"days":1,"_source":"regex"}
 
     return {"intent":"unknown","raw":user_text,"_source":"regex"}
+    
+    # “this order” / “selected order(s)” shortcuts (let resolver fill IDs)
+    if re.search(r"\b(this|current|selected)\s+order\b", low) and re.search(r"\b(delay|move|schedule|set)\b", low):
+        return {"intent":"delay_order", "_use_selection": True, "_source":"regex"}
+    if re.search(r"\b(these|selected)\s+orders\b", low) and re.search(r"\bswap\b", low):
+        return {"intent":"swap_orders", "_use_selection": True, "_source":"regex"}
+
+
+
 
 def extract_intent(user_text: str) -> dict:
     try:
@@ -101,3 +110,9 @@ def extract_intent(user_text: str) -> dict:
     except Exception:
         pass
     return _regex_fallback(user_text)
+
+ def _resolve_selection_defaults(payload: dict, transcript: str | None) -> dict:
+    if payload.pop("_use_selection", False):
+        # act as if IDs were omitted; normal selection rules apply
+        pass
+
