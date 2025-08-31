@@ -1,7 +1,17 @@
+# -*- coding: utf-8 -*-
+"""
+Scooter Wheels Scheduler — UC3 (Click-aware + Voice/Text)
+- Based on UC2 app structure (single-file: NLP + validate + apply inside app.py)
+- Adds chart selection via Plotly + streamlit-plotly-events
+- Falls back to Altair-only chart (read-only) if plotly-events package is missing
+"""
+
 import os
 import json
 import re
 from datetime import timedelta
+from typing import Optional, Tuple
+
 import pytz
 from dateutil import parser as dtp
 
@@ -9,26 +19,30 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# Minimal, press-and-hold microphone component
+# --- Optional Plotly-based click capture ---
+HAS_PLOTLY_EVENTS = True
+try:
+    import plotly.express as px
+    from streamlit_plotly_events import plotly_events
+except Exception:
+    HAS_PLOTLY_EVENTS = False
+
+# --- Voice (UC2) ---
 from streamlit_mic_recorder import mic_recorder
 
-from streamlit_altair_events import altair_events
-
-
 # ============================ PAGE & SECRETS ============================
-st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
+st.set_page_config(page_title="Scooter Wheels Scheduler — UC3", layout="wide")
 
 # Pull keys from Streamlit secrets if present
 for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
     try:
-        os.environ[k] = os.environ.get(k) or st.secrets[k]
+        os.environ[k] = os.environ.get(k) or st.secrets[k]  # type: ignore[attr-defined]
     except Exception:
         pass  # ok
 
-
 # ============================ DATA LOADING =============================
 def _oNNN_to_order(text: str) -> str:
-    """Convert legacy 'O071' -> 'Order 71'. If it doesn't match legacy, return text."""
+    """Convert legacy 'O071' -> 'Order 71'. If it doesn't match legacy, return as-is."""
     if isinstance(text, str):
         m = re.fullmatch(r"[Oo](\d{1,4})", text.strip())
         if m:
@@ -41,9 +55,9 @@ def _normalize_loaded_ids(df: pd.DataFrame, col: str = "order_id") -> pd.DataFra
     return df
 
 @st.cache_data
-def load_data():
+def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     orders = pd.read_csv("data/scooter_orders.csv", parse_dates=["due_date"])
-    sched  = pd.read_csv("data/scooter_schedule.csv", parse_dates=["start", "end", "due_date"])
+    sched  = pd.read_csv("data/scooter_schedule.csv", parse_dates=["start","end","due_date"])
     orders = _normalize_loaded_ids(orders, "order_id")
     sched  = _normalize_loaded_ids(sched,  "order_id")
     return orders, sched
@@ -64,7 +78,7 @@ if "filt_machines" not in st.session_state:
 if "cmd_log" not in st.session_state:
     st.session_state.cmd_log = []
 
-# voice pipeline bookkeeping
+# Voice pipeline bookkeeping
 if "last_audio_fp" not in st.session_state:
     st.session_state.last_audio_fp = None
 if "last_transcript" not in st.session_state:
@@ -72,13 +86,13 @@ if "last_transcript" not in st.session_state:
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
 
-# NEW: chart selection bookkeeping (most-recent last)
+# NEW: chart selection (UC3)
 if "selected_orders" not in st.session_state:
+    # keep at most 2 (for swap); newest at the end
     st.session_state.selected_orders = []  # e.g., ["Order 71", "Order 11"]
 
 # ============================ CSS / LAYOUT ============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
-
 css = """
 <style>
 /* Hide Streamlit default footer/menu */
@@ -96,7 +110,7 @@ css = """
   background: #fff; border-bottom: 1px solid #eee;
   padding: 8px 10px; margin-bottom: 6px;
 }
-.topbar .inner { display: flex; justify-content: space-between; align-items: center; }
+.topbar .inner { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .topbar .title { font-weight: 600; font-size: 16px; }
 .topbar .btn {
   background: #000; color: #fff; border: none; border-radius: 8px;
@@ -104,7 +118,7 @@ css = """
 }
 .topbar .btn:hover { opacity: 0.9; }
 
-/* Bottom mic area */
+/* Transcript / mic area */
 .bottom-wrap {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
   background: linear-gradient(to top, rgba(255,255,255,0.98), rgba(255,255,255,0.65));
@@ -114,89 +128,32 @@ css = """
   max-width: 980px; margin: 0 auto; padding: 0 24px;
   display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 16px;
 }
-
-/* --- Minimalist mic (style the recorder widget itself) --- */
-.rec-wrap { position: relative; width: 64px; height: 64px; }
-.rec-wrap > div { width: 64px !important; height: 64px !important; }
-
-/* Try to grab the button the component renders and make it pretty */
-.rec-wrap button, .rec-wrap [role="button"] {
-  width: 64px !important; height: 64px !important; padding: 0 !important;
-  border-radius: 999px !important;
-  background: radial-gradient(ellipse at 30% 30%, #ffffff 0%, #f7f7f7 60%, #efefef 100%) !important;
-  border: 1px solid #e6e6e6 !important;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.12) !important;
-}
-.rec-wrap button:hover, .rec-wrap [role="button"]:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 22px rgba(0,0,0,0.16) !important;
-}
-
-/* Hide any checkbox / stray controls the widget renders */
-.rec-wrap input[type="checkbox"], .rec-wrap label { display: none !important; }
-
-/* Replace inner text with a mic glyph using a pseudo element (minimal) */
-.rec-wrap button::before, .rec-wrap [role="button"]::before {
-  content: "";
-  display: block; width: 24px; height: 24px; margin: 0 auto;
-  background: #111;
-  -webkit-mask: url('data:image/svg+xml;utf8,\
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
-  <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
-          mask: url('data:image/svg+xml;utf8,\
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\
-  <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zm-5 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-1 1h2v3h-2v-3z"/></svg>') center/contain no-repeat;
-}
-
-/* Transcript box */
 .transcript-box {
-  min-height: 44px;
-  border: 1px dashed #e2e2e2;
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: #fbfbfb;
-  font-size: 14px;
-  color: #333;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu;
+  background: #fafafa; border: 1px solid #eee; border-radius: 10px;
+  padding: 8px 12px; min-height: 40px;
 }
-.placeholder { color:#888; }
+.transcript-box.placeholder { color: #999; font-style: italic; }
 </style>
 """
 css = css.replace("SIDEBAR_DISPLAY_VALUE", sidebar_display)
 st.markdown(css, unsafe_allow_html=True)
 
-
-# --- Selection strip (shows what’s selected & a Clear button) ---
-with st.container():
-    so = st.session_state.selected_orders
-    cols = st.columns([1,4,1])
-    with cols[1]:
-        if so:
-            st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
-        else:
-            st.caption("No order selected. Click an order bar in the Gantt.")
-    with cols[2]:
-        if so and st.button("Clear selection"):
-            st.session_state.selected_orders = []
-            st.rerun()
-
-
-
 # ============================ TOP BAR ============================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
-st.markdown('<div class="title">Scooter Wheels Scheduler</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">Scooter Wheels Scheduler — UC3 (click-aware)</div>', unsafe_allow_html=True)
 toggle_label = "Hide Filters" if st.session_state.filters_open else "Show Filters"
 if st.button(toggle_label, key="toggle_filters_btn"):
     st.session_state.filters_open = not st.session_state.filters_open
     st.rerun()
 st.markdown('</div></div>', unsafe_allow_html=True)
 
-
-# ============================ SIDEBAR FILTERS =========================
+# ============================ SIDEBAR FILTERS ============================
 if st.session_state.filters_open:
     with st.sidebar:
         st.header("Filters ⚙️")
         st.session_state.filt_max_orders = st.number_input(
-            "Orders", 1, 100, value=st.session_state.filt_max_orders, step=1
+            "Orders", 1, 100, value=int(st.session_state.filt_max_orders), step=1
         )
         wheels_all = sorted(base_schedule["wheel_type"].unique().tolist())
         st.session_state.filt_wheels = st.multiselect(
@@ -212,7 +169,7 @@ if st.session_state.filters_open:
             st.session_state.filt_machines = machines_all
             st.rerun()
 
-        with st.expander("🔎 Debug (voice & intent)"):
+        with st.expander(" Debug (voice & intent)"):
             st.caption("What Deepgram heard and what the extractor produced.")
             st.markdown("**Last Deepgram transcript:**")
             st.code(st.session_state.last_transcript or "—", language=None)
@@ -227,28 +184,27 @@ if st.session_state.filters_open:
             else:
                 st.write("—")
 
-        with st.expander("🧰 Command log (recent)"):
+        with st.expander(" Command log (recent)"):
             if st.session_state.cmd_log:
                 st.dataframe(pd.DataFrame(st.session_state.cmd_log[-10:]), use_container_width=True)
             else:
                 st.caption("No commands yet.")
 
-
-# ============================ EFFECTIVE FILTERS =========================
+# ============================ EFFECTIVE FILTERS ============================
 max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
-
-# ============================ ORDER NAME HELPERS =========================
+# ============================ ORDER NAME HELPERS (UC2 inline NLP) ============================
 UNITS = {
-    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,
-    "ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
+    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,
+    "six":6,"seven":7,"eight":8,"nine":9,"ten":10,
+    "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
     "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19
 }
 TENS = {"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90}
 
-def words_to_int(s: str) -> int | None:
+def words_to_int(s: str) -> Optional[int]:
     s = s.lower().strip().replace("-", " ")
     if s in UNITS: return UNITS[s]
     if s in TENS: return TENS[s]
@@ -259,54 +215,61 @@ def words_to_int(s: str) -> int | None:
         return int(s)
     return None
 
-def normalize_order_name(text: str) -> str | None:
+def normalize_order_name(text: str) -> Optional[str]:
     """Normalize to 'Order N'. Supports spoken numbers and legacy 'O071'."""
-    if not isinstance(text, str): return None
+    if not isinstance(text, str):
+        return None
     legacy = re.search(r"\bO(\d{1,4})\b", text, flags=re.I)
-    if legacy: return f"Order {int(legacy.group(1))}"
+    if legacy:
+        return f"Order {int(legacy.group(1))}"
     m = re.search(r"\border\s*(?:#\s*)?([A-Za-z\-]+|\d{1,4})\b", text, flags=re.I)
-    if not m: return None
+    if not m:
+        return None
     token = m.group(1)
     n = words_to_int(token)
     if n is None:
         digits = re.findall(r"\d+", token)
-        if digits: n = int(digits[-1])
+        if digits:
+            n = int(digits[-1])
     return f"Order {n}" if n is not None else None
 
-
-# ============================ NLP / INTENT =========================
+# ============================ NLP / INTENT (UC2 inline) ============================
 INTENT_SCHEMA = {
-  "type": "object",
-  "properties": {
-    "intent": {"type": "string", "enum": ["delay_order", "move_order", "swap_orders"]},
-    "order_id": {"type": "string"},          # "Order N"
-    "order_id_2": {"type": "string"},
-    "days": {"type": "number"},
-    "hours": {"type": "number"},
-    "minutes": {"type": "number"},
-    "date": {"type": "string"},
-    "time": {"type": "string"},
-    "timezone": {"type": "string", "default": "Asia/Makassar"},
-    "note": {"type": "string"}
-  },
-  "required": ["intent"],
-  "additionalProperties": False
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["delay_order", "move_order", "swap_orders"]},
+        "order_id": {"type": "string"},        # "Order N"
+        "order_id_2": {"type": "string"},
+        "days": {"type": "number"},
+        "hours": {"type": "number"},
+        "minutes": {"type": "number"},
+        "date": {"type": "string"},
+        "time": {"type": "string"},
+        "timezone": {"type": "string", "default": "Asia/Makassar"},
+        "note": {"type": "string"}
+    },
+    "required": ["intent"],
+    "additionalProperties": False
 }
-
 DEFAULT_TZ = "Asia/Makassar"
 TZ = pytz.timezone(DEFAULT_TZ)
 
 def _parse_duration_chunks(text: str):
     d = {"days":0.0,"hours":0.0,"minutes":0.0}
+
     def numtok(tok: str):
         tok = tok.strip().lower().replace(",", ".").replace("-", " ")
-        try: return float(tok)
-        except Exception: pass
+        try:
+            return float(tok)
+        except Exception:
+            pass
         val = words_to_int(tok)
         return float(val) if val is not None else None
+
     for num, unit in re.findall(r"([\d\.,]+|\b[\w\-]+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
         n = numtok(num)
-        if n is None: continue
+        if n is None: 
+            continue
         u = unit.lower()
         if u.startswith("d"): d["days"] += n
         elif u.startswith("h"): d["hours"] += n
@@ -337,11 +300,14 @@ def _extract_with_openai(user_text: str):
     )
     resp = client.responses.create(
         model="gpt-5.1",
-        input=[{"role":"system","content":SYSTEM},{"role":"user","content":GUIDE},{"role":"user","content":user_text}],
+        input=[{"role":"system","content":SYSTEM},
+               {"role":"user","content":GUIDE},
+               {"role":"user","content":user_text}],
         response_format={"type":"json_schema","json_schema":{"name":"Edit","schema":INTENT_SCHEMA}}
     )
     text = resp.output[0].content[0].text
     data = json.loads(text)
+    # Normalize any loose order token to "Order N"
     for k in ("order_id", "order_id_2"):
         if k in data and isinstance(data[k], str):
             norm = normalize_order_name(data[k])
@@ -353,7 +319,7 @@ def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    # SWAP
+    # SWAP (two orders in text)
     m = re.search(r"(?:^|\b)(swap|switch)\s+(order[^,;]*)", low)
     if m:
         ids = re.findall(r"\border\s*(?:#\s*)?([A-Za-z\-]+|\d{1,4})\b", low, flags=re.I)
@@ -363,9 +329,9 @@ def _regex_fallback(user_text: str):
             a = normalize_order_name(f"order {tokens[0]}")
             b = normalize_order_name(f"order {tokens[1]}")
             if a and b and a != b:
-                return {"intent": "swap_orders", "order_id": a, "order_id_2": b, "_source": "regex"}
+                return {"intent":"swap_orders","order_id":a,"order_id_2":b,"_source":"regex"}
 
-    # DELAY +/- (advance = negative)
+    # DELAY +/- (advance means negative sign)
     delay_sign = +1
     if re.search(r"\b(advance|bring\s+forward|pull\s+in)\b", low):
         delay_sign = -1
@@ -375,32 +341,30 @@ def _regex_fallback(user_text: str):
 
     target = normalize_order_name(low_norm) or normalize_order_name(low)
 
-    # by <duration>
+    # delay ... by X (explicit)
     m = re.search(r"\b(delay|push|postpone)\b.*?\bby\b\s+(.+)$", low_norm)
     if target and m:
         dur = _parse_duration_chunks(m.group(2))
         if any(v != 0 for v in dur.values()):
             return {
-                "intent": "delay_order",
-                "order_id": target,
-                "days": delay_sign * dur["days"],
-                "hours": delay_sign * dur["hours"],
-                "minutes": delay_sign * dur["minutes"],
-                "_source": "regex",
+                "intent":"delay_order","order_id":target,
+                "days":delay_sign*dur["days"],
+                "hours":delay_sign*dur["hours"],
+                "minutes":delay_sign*dur["minutes"],
+                "_source":"regex"
             }
 
-    # implicit duration
+    # delay X (implicit units in sentence)
     m = re.search(r"\b(delay|push|postpone)\b.*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
     if target and m:
         dur = _parse_duration_chunks(low_norm)
         if any(v != 0 for v in dur.values()):
             return {
-                "intent": "delay_order",
-                "order_id": target,
-                "days": delay_sign * dur["days"],
-                "hours": delay_sign * dur["hours"],
-                "minutes": delay_sign * dur["minutes"],
-                "_source": "regex",
+                "intent":"delay_order","order_id":target,
+                "days":delay_sign*dur["days"],
+                "hours":delay_sign*dur["hours"],
+                "minutes":delay_sign*dur["minutes"],
+                "_source":"regex"
             }
 
     # MOVE
@@ -412,19 +376,18 @@ def _regex_fallback(user_text: str):
             try:
                 dt = dtp.parse(when, fuzzy=True)
                 return {
-                    "intent": "move_order",
-                    "order_id": target,
-                    "date": dt.date().isoformat(),
-                    "time": dt.strftime("%H:%M"),
-                    "_source": "regex",
+                    "intent":"move_order","order_id":target,
+                    "date":dt.date().isoformat(), "time":dt.strftime("%H:%M"),
+                    "_source":"regex"
                 }
             except Exception:
                 pass
 
+    # Fallback "one day"
     if target and re.search(r"\b(delay|push|postpone)\b.*\bone day\b", low):
-        return {"intent": "delay_order", "order_id": target, "days": 1, "_source": "regex"}
+        return {"intent":"delay_order","order_id":target,"days":1,"_source":"regex"}
 
-    return {"intent": "unknown", "raw": user_text, "_source": "regex"}
+    return {"intent":"unknown","raw":user_text,"_source":"regex"}
 
 def extract_intent(user_text: str) -> dict:
     try:
@@ -434,11 +397,12 @@ def extract_intent(user_text: str) -> dict:
         pass
     return _regex_fallback(user_text)
 
-def validate_intent(payload: dict, orders_df, sched_df):
+# ============================ VALIDATE (UC2 inline) ============================
+def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFrame):
     intent = payload.get("intent")
 
-    def order_exists(oid):
-        return oid and (orders_df["order_id"] == oid).any()
+    def order_exists(oid: Optional[str]) -> bool:
+        return bool(oid) and (orders_df["order_id"] == oid).any()
 
     if intent not in ("delay_order", "move_order", "swap_orders"):
         return False, "Unsupported intent"
@@ -485,8 +449,7 @@ def validate_intent(payload: dict, orders_df, sched_df):
 
     return False, "Invalid payload"
 
-
-# ============================ APPLY FUNCTIONS =========================
+# ============================ APPLY (UC2 inline) ============================
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
     machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
     for m in machines:
@@ -501,7 +464,7 @@ def _repack_touched_machines(s: pd.DataFrame, touched_orders):
             last_end = s.at[idx, "end"]
     return s
 
-def apply_delay(schedule_df: pd.DataFrame, order_id: str, days=0, hours=0, minutes=0):
+def apply_delay(schedule_df: pd.DataFrame, order_id: str, *, days=0, hours=0, minutes=0) -> pd.DataFrame:
     s = schedule_df.copy()
     delta = timedelta(days=float(days or 0), hours=float(hours or 0), minutes=float(minutes or 0))
     mask = s["order_id"] == order_id
@@ -509,16 +472,16 @@ def apply_delay(schedule_df: pd.DataFrame, order_id: str, days=0, hours=0, minut
     s.loc[mask, "end"]   = s.loc[mask, "end"]   + delta
     return _repack_touched_machines(s, [order_id])
 
-def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt):
+def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt) -> pd.DataFrame:
     s = schedule_df.copy()
     t0 = s.loc[s["order_id"] == order_id, "start"].min()
     delta = target_dt - t0
-    days = delta.days
-    hours = delta.seconds // 3600
+    days    = delta.days
+    hours   = delta.seconds // 3600
     minutes = (delta.seconds % 3600) // 60
     return apply_delay(s, order_id, days=days, hours=hours, minutes=minutes)
 
-def apply_swap(schedule_df: pd.DataFrame, a: str, b: str):
+def apply_swap(schedule_df: pd.DataFrame, a: str, b: str) -> pd.DataFrame:
     s = schedule_df.copy()
     a0 = s.loc[s["order_id"] == a, "start"].min()
     b0 = s.loc[s["order_id"] == b, "start"].min()
@@ -527,113 +490,132 @@ def apply_swap(schedule_df: pd.DataFrame, a: str, b: str):
     s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600, minutes=(db.seconds % 3600)//60)
     return s
 
+# ============================ DATA SLICE FOR CHART ============================
+sched_all = st.session_state.schedule_df.copy()
+mask = sched_all["wheel_type"].isin(wheel_choice) & sched_all["machine"].isin(machine_choice)
+filtered = sched_all.loc[mask].copy()
 
-# ============================ GANTT =========================
-sched = st.session_state.schedule_df.copy()
-sched = sched[sched["wheel_type"].isin(wheel_choice)]
-sched = sched[sched["machine"].isin(machine_choice)]
-order_priority = sched.groupby("order_id", as_index=False)["start"].min().sort_values("start")
+# keep first N orders by earliest start (for readability)
+order_priority = filtered.groupby("order_id", as_index=False)["start"].min().sort_values("start")
 keep_ids = order_priority["order_id"].head(max_orders).tolist()
-sched = sched[sched["order_id"].isin(keep_ids)].copy()
+sched = filtered[filtered["order_id"].isin(keep_ids)].copy()
 
 if sched.empty:
     st.info("No operations match the current filters.")
 else:
-    domain = ["Urban-200", "Offroad-250", "Racing-180", "HeavyDuty-300", "Eco-160"]
-    range_ = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
-    select_order = alt.selection_point(fields=["order_id"], on="click", clear="dblclick")
-    y_machines_sorted = sorted(sched["machine"].unique().tolist())
-    base_enc = {
-        "y": alt.Y("machine:N", sort=y_machines_sorted, title=None),
-        "x": alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
-        "x2": "end:T",
-    }
-    bars = alt.Chart(sched).mark_bar(cornerRadius=3).encode(
-        color=alt.condition(
-            select_order,
-            alt.Color("wheel_type:N", scale=alt.Scale(domain=domain, range=range_), legend=None),
-            alt.value("#dcdcdc"),
-        ),
-        opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.25)),
-        tooltip=[
-            alt.Tooltip("order_id:N", title="Order"),
-            alt.Tooltip("operation:N", title="Operation"),
-            alt.Tooltip("sequence:Q", title="Seq"),
-            alt.Tooltip("machine:N", title="Machine"),
-            alt.Tooltip("start:T", title="Start"),
-            alt.Tooltip("end:T", title="End"),
-            alt.Tooltip("due_date:T", title="Due"),
-            alt.Tooltip("wheel_type:N", title="Wheel"),
-        ],
-    )
-    labels = alt.Chart(sched).mark_text(
-        align="left", dx=6, baseline="middle", fontSize=10, color="white"
-    ).encode(
-        text="order_id:N",
-        opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.7)),
-    )
-    gantt = (
-        alt.layer(bars, labels, data=sched)
-        .encode(**base_enc)
-        .add_params(select_order)
-        .properties(width="container", height=520)
-        .configure_view(stroke=None)
-    )
+    # ======================= SELECTION STRIP (UC3) =======================
+    with st.container():
+        so = st.session_state.selected_orders
+        cols = st.columns([1,4,1])
+        with cols[1]:
+            if so:
+                st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
+            else:
+                st.caption("No order selected. Click a bar in the plan.")
+        with cols[2]:
+            if so and st.button("Clear selection"):
+                st.session_state.selected_orders = []
+                st.rerun()
 
-    # Optional: visually emphasize currently selected orders (if sched is a copy)
-    try:
-        sched = sched.copy()
-        sched["is_selected"] = sched["order_id"].isin(st.session_state.selected_orders)
-    except Exception:
-        pass
+    # ======================= CHART RENDER =======================
+    if HAS_PLOTLY_EVENTS:
+        # Plotly timeline with click capture
+        sched_plot = sched.copy()
+        sched_plot["is_selected"] = sched_plot["order_id"].isin(st.session_state.selected_orders)
 
-    st.altair_chart(gantt, use_container_width=True)
+        fig = px.timeline(
+            sched_plot,
+            x_start="start",
+            x_end="end",
+            y="machine",
+            color="order_id",
+            hover_data=["order_id","operation","sequence","wheel_type","start","end","due_date"],
+            custom_data=["order_id","operation","sequence","wheel_type"],
+        )
+        fig.update_yaxes(autorange="reversed")
+        fig.update_layout(height=520, margin=dict(l=20,r=20,t=10,b=10), showlegend=False)
 
-    # Capture click events on bars and update selection
-    clicked = altair_events(
-        chart=gantt,
-        select="click",            # single clicks
-        fields=["order_id"],       # we only need the order id
-        timeout=1500,              # ms
-        refresh_on=None
-    )
-    if clicked and isinstance(clicked, list):
-        oid = (clicked[-1] or {}).get("order_id")
-        if isinstance(oid, str) and oid.strip():
-            # toggle & cap at 2 (for swap); newest at the end
-            sel = [o for o in st.session_state.selected_orders if o != oid]
-            sel.append(oid)
-            if len(sel) > 2:
-                sel = sel[-2:]
-            st.session_state.selected_orders = sel
-            st.rerun()
+        selected = plotly_events(
+            fig, click_event=True, select_event=False, hover_event=False,
+            override_height=520, override_width="100%",
+        )
 
+        st.plotly_chart(fig, use_container_width=True)
 
-# ============================ DEEPGRAM (bytes) =========================
-def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") -> str:
-    key = os.getenv("DEEPGRAM_API_KEY")
-    if not key:
-        raise RuntimeError("DEEPGRAM_API_KEY not set")
-    import requests
-    url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=en"
-    headers = {"Authorization": f"Token {key}", "Content-Type": mimetype}
-    r = requests.post(url, headers=headers, data=wav_bytes, timeout=45)
-    try:
-        r.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"Deepgram error: {r.text}") from e
-    j = r.json()
-    try:
-        return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
-    except Exception:
-        raise RuntimeError(f"Deepgram: no transcript in response: {j}")
+        # Update selection from click
+        if selected:
+            try:
+                last = selected[-1]
+                cdata = last.get("customdata") or []
+                oid = cdata[0] if cdata else None
+                if isinstance(oid, str) and oid.strip():
+                    sel = [o for o in st.session_state.selected_orders if o != oid]
+                    sel.append(oid)
+                    if len(sel) > 2:
+                        sel = sel[-2:]
+                    st.session_state.selected_orders = sel
+                    st.rerun()
+            except Exception as e:
+                st.warning(f"Click selection error: {e}")
 
+    else:
+        # Altair (read-only) fallback, preserves UC2 visual style
+        domain = ["Urban-200", "Offroad-250", "Racing-180", "HeavyDuty-300", "Eco-160"]
+        range_  = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
 
-# ============================ PIPELINE (shared) =========================
+        select_order = alt.selection_point(fields=["order_id"], on="click", clear="dblclick")
+        y_machines_sorted = sorted(sched["machine"].unique().tolist())
+        base_enc = {
+            "y": alt.Y("machine:N", sort=y_machines_sorted, title=None),
+            "x": alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
+            "x2": "end:T",
+        }
 
-def _resolve_selection_defaults(payload: dict, transcript: str | None) -> dict:
+        bars = alt.Chart(sched).mark_bar(cornerRadius=3).encode(
+            color=alt.condition(
+                select_order,
+                alt.Color("wheel_type:N", scale=alt.Scale(domain=domain, range=range_), legend=None),
+                alt.value("#dcdcdc"),
+            ),
+            opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.25)),
+            tooltip=[
+                alt.Tooltip("order_id:N", title="Order"),
+                alt.Tooltip("operation:N", title="Operation"),
+                alt.Tooltip("sequence:Q", title="Seq"),
+                alt.Tooltip("machine:N", title="Machine"),
+                alt.Tooltip("start:T", title="Start"),
+                alt.Tooltip("end:T", title="End"),
+                alt.Tooltip("due_date:T", title="Due"),
+                alt.Tooltip("wheel_type:N", title="Wheel"),
+            ],
+        )
+
+        labels = alt.Chart(sched).mark_text(
+            align="left", dx=6, baseline="middle", fontSize=10, color="white"
+        ).encode(
+            text="order_id:N",
+            opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.7)),
+        )
+
+        gantt = (
+            alt.layer(bars, labels, data=sched)
+            .encode(**base_enc)
+            .add_params(select_order)
+            .properties(width="container", height=520)
+            .configure_view(stroke=None)
+        )
+        st.altair_chart(gantt, use_container_width=True)
+
+        st.warning(
+            "Clickable selection requires `streamlit-plotly-events`. "
+            "Install it and redeploy to enable 'click what you mean'.",
+            icon="⚠️"
+        )
+
+# ============================ SELECTION-AWARE RESOLVER (UC3) ============================
+def _resolve_selection_defaults(payload: dict, transcript: Optional[str]) -> dict:
     """
-    If the user omitted IDs (e.g., said 'delay this order') fill them from
+    If the user omitted IDs (e.g., 'delay this order'), fill from
     st.session_state.selected_orders (most recent last).
     """
     sel = st.session_state.selected_orders or []
@@ -657,14 +639,34 @@ def _resolve_selection_defaults(payload: dict, transcript: str | None) -> dict:
 
     return payload
 
+# ============================ DEEPGRAM (bytes) ============================
+def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") -> str:
+    key = os.getenv("DEEPGRAM_API_KEY")
+    if not key:
+        raise RuntimeError("DEEPGRAM_API_KEY not set")
+    import requests
+    url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=en"
+    headers = {"Authorization": f"Token {key}", "Content-Type": mimetype}
+    r = requests.post(url, headers=headers, data=wav_bytes, timeout=45)
+    try:
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"Deepgram error: {r.text}") from e
+    j = r.json()
+    try:
+        return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
+    except Exception:
+        raise RuntimeError(f"Deepgram: no transcript in response: {j}")
 
-def _process_and_apply(cmd_text: str, *, source_hint: str = None):
-    """Extract -> validate -> apply. Also records detailed logs for debugging."""
+# ============================ PIPELINE (shared) ============================
+def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
+    """Extract -> (UC3) resolve selection -> validate -> apply. Also record logs."""
     from copy import deepcopy
     try:
         payload = extract_intent(cmd_text)
-            # NEW: if IDs are missing, fill from current chart selection
-            payload = _resolve_selection_defaults(payload, cmd_text)
+
+        # NEW (UC3): fill from current chart selection if IDs omitted
+        payload = _resolve_selection_defaults(payload, cmd_text)
 
         st.session_state.last_extraction = {
             "raw": cmd_text,
@@ -720,24 +722,21 @@ def _process_and_apply(cmd_text: str, *, source_hint: str = None):
     except Exception as e:
         st.error(f"⚠️ Error: {e}")
 
-
-# ============================ BOTTOM MIC (single minimalist control) =========================
+# ============================ BOTTOM MIC (single minimalist control) ============================
 with st.container():
     st.markdown('<div class="bottom-wrap"><div class="bottom-inner">', unsafe_allow_html=True)
 
-    # The only visible control: the recorder itself, restyled via CSS above
-    st.markdown('<div class="rec-wrap">', unsafe_allow_html=True)
+    # mic control
     rec = mic_recorder(
-        start_prompt="",   # no text labels
+        start_prompt="",   # no labels
         stop_prompt="",
         key="press_mic",
         just_once=False,
         format="wav",
         use_container_width=False
     )
-    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Transcript area
+    # transcript area
     if st.session_state.last_transcript:
         st.markdown(f'<div class="transcript-box">{st.session_state.last_transcript}</div>', unsafe_allow_html=True)
     else:
@@ -745,7 +744,7 @@ with st.container():
 
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-# When a recording finishes: transcribe -> show below mic -> apply automatically
+# When a recording finishes: transcribe -> show -> apply automatically
 if rec and isinstance(rec, dict) and rec.get("bytes"):
     wav_bytes = rec["bytes"]
     fp = (len(wav_bytes), hash(wav_bytes[:1024]))
@@ -761,3 +760,12 @@ if rec and isinstance(rec, dict) and rec.get("bytes"):
                 st.warning("No speech detected.")
         except Exception as e:
             st.error(f"Transcription failed: {e}")
+
+# ============================ OPTIONAL: manual text command ============================
+with st.expander("Manual command (debug)"):
+    t = st.text_input("Type a command (e.g., 'delay this order by 2 days' or 'swap orders')")
+    if st.button("Apply command", type="primary"):
+        if t.strip():
+            _process_and_apply(t.strip(), source_hint="text/debug")
+        else:
+            st.info("Type something first.")
