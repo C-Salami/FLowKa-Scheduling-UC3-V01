@@ -12,6 +12,8 @@ import altair as alt
 # Minimal, press-and-hold microphone component
 from streamlit_mic_recorder import mic_recorder
 
+from streamlit_altair_events import altair_events
+
 
 # ============================ PAGE & SECRETS ============================
 st.set_page_config(page_title="Scooter Wheels Scheduler", layout="wide")
@@ -70,6 +72,9 @@ if "last_transcript" not in st.session_state:
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
 
+# NEW: chart selection bookkeeping (most-recent last)
+if "selected_orders" not in st.session_state:
+    st.session_state.selected_orders = []  # e.g., ["Order 71", "Order 11"]
 
 # ============================ CSS / LAYOUT ============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
@@ -158,6 +163,22 @@ css = """
 """
 css = css.replace("SIDEBAR_DISPLAY_VALUE", sidebar_display)
 st.markdown(css, unsafe_allow_html=True)
+
+
+# --- Selection strip (shows what’s selected & a Clear button) ---
+with st.container():
+    so = st.session_state.selected_orders
+    cols = st.columns([1,4,1])
+    with cols[1]:
+        if so:
+            st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
+        else:
+            st.caption("No order selected. Click an order bar in the Gantt.")
+    with cols[2]:
+        if so and st.button("Clear selection"):
+            st.session_state.selected_orders = []
+            st.rerun()
+
 
 
 # ============================ TOP BAR ============================
@@ -558,7 +579,34 @@ else:
         .properties(width="container", height=520)
         .configure_view(stroke=None)
     )
+
+    # Optional: visually emphasize currently selected orders (if sched is a copy)
+    try:
+        sched = sched.copy()
+        sched["is_selected"] = sched["order_id"].isin(st.session_state.selected_orders)
+    except Exception:
+        pass
+
     st.altair_chart(gantt, use_container_width=True)
+
+    # Capture click events on bars and update selection
+    clicked = altair_events(
+        chart=gantt,
+        select="click",            # single clicks
+        fields=["order_id"],       # we only need the order id
+        timeout=1500,              # ms
+        refresh_on=None
+    )
+    if clicked and isinstance(clicked, list):
+        oid = (clicked[-1] or {}).get("order_id")
+        if isinstance(oid, str) and oid.strip():
+            # toggle & cap at 2 (for swap); newest at the end
+            sel = [o for o in st.session_state.selected_orders if o != oid]
+            sel.append(oid)
+            if len(sel) > 2:
+                sel = sel[-2:]
+            st.session_state.selected_orders = sel
+            st.rerun()
 
 
 # ============================ DEEPGRAM (bytes) =========================
@@ -582,11 +630,41 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
 
 
 # ============================ PIPELINE (shared) =========================
+
+def _resolve_selection_defaults(payload: dict, transcript: str | None) -> dict:
+    """
+    If the user omitted IDs (e.g., said 'delay this order') fill them from
+    st.session_state.selected_orders (most recent last).
+    """
+    sel = st.session_state.selected_orders or []
+    latest = sel[-1] if sel else None
+    two = sel[-2:] if len(sel) >= 2 else sel
+    intent = payload.get("intent")
+
+    if intent in ("delay_order", "move_order"):
+        if not payload.get("order_id") and latest:
+            payload["order_id"] = latest
+
+    if intent == "swap_orders":
+        if not payload.get("order_id") and not payload.get("order_id_2") and len(two) == 2:
+            payload["order_id"], payload["order_id_2"] = two[0], two[1]
+        elif not payload.get("order_id") and latest:
+            payload["order_id"] = latest
+        elif payload.get("order_id") and not payload.get("order_id_2") and len(two) == 2:
+            other = two[0] if two[1] == payload["order_id"] else two[-1]
+            if other != payload["order_id"]:
+                payload["order_id_2"] = other
+
+    return payload
+
+
 def _process_and_apply(cmd_text: str, *, source_hint: str = None):
     """Extract -> validate -> apply. Also records detailed logs for debugging."""
     from copy import deepcopy
     try:
         payload = extract_intent(cmd_text)
+            # NEW: if IDs are missing, fill from current chart selection
+            payload = _resolve_selection_defaults(payload, cmd_text)
 
         st.session_state.last_extraction = {
             "raw": cmd_text,
