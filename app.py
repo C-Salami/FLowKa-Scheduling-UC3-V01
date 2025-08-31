@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Scooter Wheels Scheduler — UC3 (Click-aware + Voice/Text)
-- Based on UC2 app structure (single-file: NLP + validate + apply inside app.py)
-- Adds chart selection via Plotly + streamlit-plotly-events
-- Falls back to Altair-only chart (read-only) if plotly-events package is missing
+This version fixes the double-chart issue by letting `plotly_events` render the chart
+(it already does) and removing the extra `st.plotly_chart`. It also keeps the
+Altair fallback if the events package isn't available.
 """
 
 import os
@@ -33,16 +33,14 @@ from streamlit_mic_recorder import mic_recorder
 # ============================ PAGE & SECRETS ============================
 st.set_page_config(page_title="Scooter Wheels Scheduler — UC3", layout="wide")
 
-# Pull keys from Streamlit secrets if present
 for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
     try:
         os.environ[k] = os.environ.get(k) or st.secrets[k]  # type: ignore[attr-defined]
     except Exception:
-        pass  # ok
+        pass
 
 # ============================ DATA LOADING =============================
 def _oNNN_to_order(text: str) -> str:
-    """Convert legacy 'O071' -> 'Order 71'. If it doesn't match legacy, return as-is."""
     if isinstance(text, str):
         m = re.fullmatch(r"[Oo](\d{1,4})", text.strip())
         if m:
@@ -78,33 +76,24 @@ if "filt_machines" not in st.session_state:
 if "cmd_log" not in st.session_state:
     st.session_state.cmd_log = []
 
-# Voice pipeline bookkeeping
 if "last_audio_fp" not in st.session_state:
     st.session_state.last_audio_fp = None
 if "last_transcript" not in st.session_state:
     st.session_state.last_transcript = None
 if "last_extraction" not in st.session_state:
-    st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
+    st.session_state.last_extraction = None
 
 # NEW: chart selection (UC3)
 if "selected_orders" not in st.session_state:
-    # keep at most 2 (for swap); newest at the end
-    st.session_state.selected_orders = []  # e.g., ["Order 71", "Order 11"]
+    st.session_state.selected_orders = []  # keep max 2, newest last
 
 # ============================ CSS / LAYOUT ============================
 sidebar_display = "block" if st.session_state.filters_open else "none"
 css = """
 <style>
-/* Hide Streamlit default footer/menu */
 #MainMenu, footer { visibility: hidden; }
-
-/* Sidebar collapsible */
 [data-testid="stSidebar"] { display: SIDEBAR_DISPLAY_VALUE; }
-
-/* Leave room for bottom mic area */
 .block-container { padding-top: 6px; padding-bottom: 200px; }
-
-/* Top bar */
 .topbar {
   position: sticky; top: 0; z-index: 100;
   background: #fff; border-bottom: 1px solid #eee;
@@ -117,8 +106,6 @@ css = """
   padding: 6px 12px; font-weight: 600; cursor: pointer;
 }
 .topbar .btn:hover { opacity: 0.9; }
-
-/* Transcript / mic area */
 .bottom-wrap {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
   background: linear-gradient(to top, rgba(255,255,255,0.98), rgba(255,255,255,0.65));
@@ -173,7 +160,6 @@ if st.session_state.filters_open:
             st.caption("What Deepgram heard and what the extractor produced.")
             st.markdown("**Last Deepgram transcript:**")
             st.code(st.session_state.last_transcript or "—", language=None)
-
             st.markdown("**Last extraction (raw → payload):**")
             if st.session_state.last_extraction:
                 st.write("Raw text sent to extractor:")
@@ -195,13 +181,9 @@ max_orders = int(st.session_state.filt_max_orders)
 wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
 machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
 
-# ============================ ORDER NAME HELPERS (UC2 inline NLP) ============================
-UNITS = {
-    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,
-    "six":6,"seven":7,"eight":8,"nine":9,"ten":10,
-    "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
-    "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19
-}
+# ============================ NLP/VALIDATE/APPLY HELPERS (inline) ============================
+UNITS = {"zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,
+         "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19}
 TENS = {"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90}
 
 def words_to_int(s: str) -> Optional[int]:
@@ -216,7 +198,6 @@ def words_to_int(s: str) -> Optional[int]:
     return None
 
 def normalize_order_name(text: str) -> Optional[str]:
-    """Normalize to 'Order N'. Supports spoken numbers and legacy 'O071'."""
     if not isinstance(text, str):
         return None
     legacy = re.search(r"\bO(\d{1,4})\b", text, flags=re.I)
@@ -233,12 +214,11 @@ def normalize_order_name(text: str) -> Optional[str]:
             n = int(digits[-1])
     return f"Order {n}" if n is not None else None
 
-# ============================ NLP / INTENT (UC2 inline) ============================
 INTENT_SCHEMA = {
     "type": "object",
     "properties": {
         "intent": {"type": "string", "enum": ["delay_order", "move_order", "swap_orders"]},
-        "order_id": {"type": "string"},        # "Order N"
+        "order_id": {"type": "string"},
         "order_id_2": {"type": "string"},
         "days": {"type": "number"},
         "hours": {"type": "number"},
@@ -256,7 +236,6 @@ TZ = pytz.timezone(DEFAULT_TZ)
 
 def _parse_duration_chunks(text: str):
     d = {"days":0.0,"hours":0.0,"minutes":0.0}
-
     def numtok(tok: str):
         tok = tok.strip().lower().replace(",", ".").replace("-", " ")
         try:
@@ -265,7 +244,6 @@ def _parse_duration_chunks(text: str):
             pass
         val = words_to_int(tok)
         return float(val) if val is not None else None
-
     for num, unit in re.findall(r"([\d\.,]+|\b[\w\-]+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
         n = numtok(num)
         if n is None: 
@@ -307,7 +285,6 @@ def _extract_with_openai(user_text: str):
     )
     text = resp.output[0].content[0].text
     data = json.loads(text)
-    # Normalize any loose order token to "Order N"
     for k in ("order_id", "order_id_2"):
         if k in data and isinstance(data[k], str):
             norm = normalize_order_name(data[k])
@@ -319,7 +296,6 @@ def _regex_fallback(user_text: str):
     t = user_text.strip()
     low = t.lower()
 
-    # SWAP (two orders in text)
     m = re.search(r"(?:^|\b)(swap|switch)\s+(order[^,;]*)", low)
     if m:
         ids = re.findall(r"\border\s*(?:#\s*)?([A-Za-z\-]+|\d{1,4})\b", low, flags=re.I)
@@ -331,7 +307,6 @@ def _regex_fallback(user_text: str):
             if a and b and a != b:
                 return {"intent":"swap_orders","order_id":a,"order_id_2":b,"_source":"regex"}
 
-    # DELAY +/- (advance means negative sign)
     delay_sign = +1
     if re.search(r"\b(advance|bring\s+forward|pull\s+in)\b", low):
         delay_sign = -1
@@ -340,34 +315,22 @@ def _regex_fallback(user_text: str):
         low_norm = low
 
     target = normalize_order_name(low_norm) or normalize_order_name(low)
-
-    # delay ... by X (explicit)
     m = re.search(r"\b(delay|push|postpone)\b.*?\bby\b\s+(.+)$", low_norm)
     if target and m:
         dur = _parse_duration_chunks(m.group(2))
         if any(v != 0 for v in dur.values()):
-            return {
-                "intent":"delay_order","order_id":target,
-                "days":delay_sign*dur["days"],
-                "hours":delay_sign*dur["hours"],
-                "minutes":delay_sign*dur["minutes"],
-                "_source":"regex"
-            }
+            return {"intent":"delay_order","order_id":target,
+                    "days":delay_sign*dur["days"],"hours":delay_sign*dur["hours"],"minutes":delay_sign*dur["minutes"],
+                    "_source":"regex"}
 
-    # delay X (implicit units in sentence)
     m = re.search(r"\b(delay|push|postpone)\b.*?(days?|d|hours?|h|minutes?|mins?|m)\b", low_norm)
     if target and m:
         dur = _parse_duration_chunks(low_norm)
         if any(v != 0 for v in dur.values()):
-            return {
-                "intent":"delay_order","order_id":target,
-                "days":delay_sign*dur["days"],
-                "hours":delay_sign*dur["hours"],
-                "minutes":delay_sign*dur["minutes"],
-                "_source":"regex"
-            }
+            return {"intent":"delay_order","order_id":target,
+                    "days":delay_sign*dur["days"],"hours":delay_sign*dur["hours"],"minutes":delay_sign*dur["minutes"],
+                    "_source":"regex"}
 
-    # MOVE
     m = re.search(r"\b(move|set|schedule)\b.*?\b(to|on)\s+(.+)", low)
     if m:
         target = target or normalize_order_name(low)
@@ -375,15 +338,12 @@ def _regex_fallback(user_text: str):
         if target and when:
             try:
                 dt = dtp.parse(when, fuzzy=True)
-                return {
-                    "intent":"move_order","order_id":target,
-                    "date":dt.date().isoformat(), "time":dt.strftime("%H:%M"),
-                    "_source":"regex"
-                }
+                return {"intent":"move_order","order_id":target,
+                        "date":dt.date().isoformat(),"time":dt.strftime("%H:%M"),
+                        "_source":"regex"}
             except Exception:
                 pass
 
-    # Fallback "one day"
     if target and re.search(r"\b(delay|push|postpone)\b.*\bone day\b", low):
         return {"intent":"delay_order","order_id":target,"days":1,"_source":"regex"}
 
@@ -397,21 +357,16 @@ def extract_intent(user_text: str) -> dict:
         pass
     return _regex_fallback(user_text)
 
-# ============================ VALIDATE (UC2 inline) ============================
 def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFrame):
     intent = payload.get("intent")
-
     def order_exists(oid: Optional[str]) -> bool:
         return bool(oid) and (orders_df["order_id"] == oid).any()
-
     if intent not in ("delay_order", "move_order", "swap_orders"):
         return False, "Unsupported intent"
-
     if intent in ("delay_order", "move_order", "swap_orders"):
         oid = payload.get("order_id")
         if not order_exists(oid):
             return False, f"Unknown order_id: {oid}"
-
     if intent == "swap_orders":
         oid2 = payload.get("order_id_2")
         if not order_exists(oid2):
@@ -419,7 +374,6 @@ def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFra
         if oid2 == payload.get("order_id"):
             return False, "Cannot swap the same order."
         return True, "ok"
-
     if intent == "delay_order":
         for k in ("days","hours","minutes"):
             if k in payload and payload[k] is not None:
@@ -430,7 +384,6 @@ def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFra
         if not any(payload.get(k) for k in ("days","hours","minutes")):
             return False, "Delay needs a duration (days/hours/minutes)."
         return True, "ok"
-
     if intent == "move_order":
         date_str = payload.get("date")
         hhmm = payload.get("time") or "08:00"
@@ -446,10 +399,8 @@ def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFra
         except Exception:
             return False, f"Unparseable datetime: {date_str} {hhmm}"
         return True, "ok"
-
     return False, "Invalid payload"
 
-# ============================ APPLY (UC2 inline) ============================
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
     machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
     for m in machines:
@@ -494,8 +445,6 @@ def apply_swap(schedule_df: pd.DataFrame, a: str, b: str) -> pd.DataFrame:
 sched_all = st.session_state.schedule_df.copy()
 mask = sched_all["wheel_type"].isin(wheel_choice) & sched_all["machine"].isin(machine_choice)
 filtered = sched_all.loc[mask].copy()
-
-# keep first N orders by earliest start (for readability)
 order_priority = filtered.groupby("order_id", as_index=False)["start"].min().sort_values("start")
 keep_ids = order_priority["order_id"].head(max_orders).tolist()
 sched = filtered[filtered["order_id"].isin(keep_ids)].copy()
@@ -503,7 +452,7 @@ sched = filtered[filtered["order_id"].isin(keep_ids)].copy()
 if sched.empty:
     st.info("No operations match the current filters.")
 else:
-    # ======================= SELECTION STRIP (UC3) =======================
+    # Selection strip
     with st.container():
         so = st.session_state.selected_orders
         cols = st.columns([1,4,1])
@@ -517,9 +466,8 @@ else:
                 st.session_state.selected_orders = []
                 st.rerun()
 
-    # ======================= CHART RENDER =======================
+    # ----- CHART RENDER -----
     if HAS_PLOTLY_EVENTS:
-        # Plotly timeline with click capture
         sched_plot = sched.copy()
         sched_plot["is_selected"] = sched_plot["order_id"].isin(st.session_state.selected_orders)
 
@@ -535,14 +483,12 @@ else:
         fig.update_yaxes(autorange="reversed")
         fig.update_layout(height=520, margin=dict(l=20,r=20,t=10,b=10), showlegend=False)
 
+        # IMPORTANT: plotly_events RENDERS the chart and returns events. Do NOT call st.plotly_chart again.
         selected = plotly_events(
             fig, click_event=True, select_event=False, hover_event=False,
-            override_height=520, override_width="100%",
+            key="gantt_events", override_height=520
         )
 
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Update selection from click
         if selected:
             try:
                 last = selected[-1]
@@ -557,9 +503,8 @@ else:
                     st.rerun()
             except Exception as e:
                 st.warning(f"Click selection error: {e}")
-
     else:
-        # Altair (read-only) fallback, preserves UC2 visual style
+        # Altair fallback (read-only)
         domain = ["Urban-200", "Offroad-250", "Racing-180", "HeavyDuty-300", "Eco-160"]
         range_  = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
 
@@ -592,18 +537,13 @@ else:
 
         labels = alt.Chart(sched).mark_text(
             align="left", dx=6, baseline="middle", fontSize=10, color="white"
-        ).encode(
-            text="order_id:N",
-            opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.7)),
-        )
+        ).encode(text="order_id:N", opacity=alt.condition(select_order, alt.value(1.0), alt.value(0.7)))
 
-        gantt = (
-            alt.layer(bars, labels, data=sched)
-            .encode(**base_enc)
-            .add_params(select_order)
-            .properties(width="container", height=520)
-            .configure_view(stroke=None)
-        )
+        gantt = (alt.layer(bars, labels, data=sched)
+                 .encode(**base_enc)
+                 .add_params(select_order)
+                 .properties(width="container", height=520)
+                 .configure_view(stroke=None))
         st.altair_chart(gantt, use_container_width=True)
 
         st.warning(
@@ -614,19 +554,13 @@ else:
 
 # ============================ SELECTION-AWARE RESOLVER (UC3) ============================
 def _resolve_selection_defaults(payload: dict, transcript: Optional[str]) -> dict:
-    """
-    If the user omitted IDs (e.g., 'delay this order'), fill from
-    st.session_state.selected_orders (most recent last).
-    """
     sel = st.session_state.selected_orders or []
     latest = sel[-1] if sel else None
     two = sel[-2:] if len(sel) >= 2 else sel
     intent = payload.get("intent")
-
     if intent in ("delay_order", "move_order"):
         if not payload.get("order_id") and latest:
             payload["order_id"] = latest
-
     if intent == "swap_orders":
         if not payload.get("order_id") and not payload.get("order_id_2") and len(two) == 2:
             payload["order_id"], payload["order_id_2"] = two[0], two[1]
@@ -636,7 +570,6 @@ def _resolve_selection_defaults(payload: dict, transcript: Optional[str]) -> dic
             other = two[0] if two[1] == payload["order_id"] else two[-1]
             if other != payload["order_id"]:
                 payload["order_id_2"] = other
-
     return payload
 
 # ============================ DEEPGRAM (bytes) ============================
@@ -660,38 +593,27 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
 
 # ============================ PIPELINE (shared) ============================
 def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
-    """Extract -> (UC3) resolve selection -> validate -> apply. Also record logs."""
     from copy import deepcopy
     try:
         payload = extract_intent(cmd_text)
-
-        # NEW (UC3): fill from current chart selection if IDs omitted
         payload = _resolve_selection_defaults(payload, cmd_text)
-
         st.session_state.last_extraction = {
             "raw": cmd_text,
             "payload": deepcopy(payload),
             "source": source_hint or payload.get("_source", "?"),
         }
-
         ok, msg = validate_intent(payload, orders, st.session_state.schedule_df)
-
         log_payload = deepcopy(payload)
         if "_target_dt" in log_payload:
             log_payload["_target_dt"] = str(log_payload["_target_dt"])
         st.session_state.cmd_log.append({
-            "raw": cmd_text,
-            "payload": log_payload,
-            "ok": bool(ok),
-            "msg": msg,
+            "raw": cmd_text, "payload": log_payload, "ok": bool(ok), "msg": msg,
             "source": source_hint or payload.get("_source", "?")
         })
         st.session_state.cmd_log = st.session_state.cmd_log[-50:]
-
         if not ok:
             st.error(f"❌ Cannot apply: {msg}")
             return
-
         if payload["intent"] == "delay_order":
             st.session_state.schedule_df = apply_delay(
                 st.session_state.schedule_df,
@@ -701,7 +623,6 @@ def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
                 minutes=payload.get("minutes", 0),
             )
             st.success(f"✅ Delayed {payload['order_id']}.")
-
         elif payload["intent"] == "move_order":
             st.session_state.schedule_df = apply_move(
                 st.session_state.schedule_df,
@@ -709,7 +630,6 @@ def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
                 payload["_target_dt"],
             )
             st.success(f"✅ Moved {payload['order_id']}.")
-
         elif payload["intent"] == "swap_orders":
             st.session_state.schedule_df = apply_swap(
                 st.session_state.schedule_df,
@@ -717,34 +637,20 @@ def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
                 payload["order_id_2"],
             )
             st.success(f"✅ Swapped {payload['order_id']} and {payload['order_id_2']}.")
-
         st.rerun()
     except Exception as e:
         st.error(f"⚠️ Error: {e}")
 
-# ============================ BOTTOM MIC (single minimalist control) ============================
+# ============================ MIC (voice) ============================
 with st.container():
     st.markdown('<div class="bottom-wrap"><div class="bottom-inner">', unsafe_allow_html=True)
-
-    # mic control
-    rec = mic_recorder(
-        start_prompt="",   # no labels
-        stop_prompt="",
-        key="press_mic",
-        just_once=False,
-        format="wav",
-        use_container_width=False
-    )
-
-    # transcript area
+    rec = mic_recorder(start_prompt="", stop_prompt="", key="press_mic", just_once=False, format="wav", use_container_width=False)
     if st.session_state.last_transcript:
         st.markdown(f'<div class="transcript-box">{st.session_state.last_transcript}</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="transcript-box placeholder">(your transcript will appear here)</div>', unsafe_allow_html=True)
-
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-# When a recording finishes: transcribe -> show -> apply automatically
 if rec and isinstance(rec, dict) and rec.get("bytes"):
     wav_bytes = rec["bytes"]
     fp = (len(wav_bytes), hash(wav_bytes[:1024]))
@@ -753,7 +659,7 @@ if rec and isinstance(rec, dict) and rec.get("bytes"):
         try:
             with st.spinner("Transcribing…"):
                 transcript = _deepgram_transcribe_bytes(wav_bytes, mimetype="audio/wav")
-            st.session_state.last_transcript = transcript  # exact text from Deepgram
+            st.session_state.last_transcript = transcript
             if transcript:
                 _process_and_apply(transcript, source_hint="voice/deepgram")
             else:
@@ -761,7 +667,7 @@ if rec and isinstance(rec, dict) and rec.get("bytes"):
         except Exception as e:
             st.error(f"Transcription failed: {e}")
 
-# ============================ OPTIONAL: manual text command ============================
+# ============================ Manual text command (debug) ============================
 with st.expander("Manual command (debug)"):
     t = st.text_input("Type a command (e.g., 'delay this order by 2 days' or 'swap orders')")
     if st.button("Apply command", type="primary"):
