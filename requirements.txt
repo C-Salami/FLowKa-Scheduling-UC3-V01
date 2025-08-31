@@ -9,5 +9,7 @@ openai>=1.40.0
 streamlit-audiorec
 requests>=2.31.0
 streamlit-mic-recorder
+streamlit-altair-events>=0.1.4
+
 
 
