@@ -535,7 +535,7 @@ with st.container():
             st.rerun()
 
 # ============================================================================
-# ALTAIR GANTT (SAME LOOK) + CLICK EVENTS (UC3)
+# ALTAIR GANTT (single-view for selection) + CLICK EVENTS (UC3)
 # ============================================================================
 if sched.empty:
     st.info("No operations match the current filters.")
@@ -548,54 +548,43 @@ else:
         clear="dblclick"
     )
 
-    # Base encodings
+    # Base encodings (SINGLE VIEW ONLY — no layer)
     y_machines_sorted = sorted(sched["machine"].unique().tolist())
-    base = alt.Chart(sched).encode(
-        x=alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
-        x2="end:T",
-        y=alt.Y("machine:N", title=None, sort=y_machines_sorted),
-    )
-
-    bars = base.mark_bar(cornerRadius=3).encode(
-        color=alt.Color("wheel_type:N", legend=None),
-        opacity=alt.condition(order_sel, alt.value(1.0), alt.value(0.35)),
-        tooltip=[
-            alt.Tooltip("order_id:N", title="Order"),
-            alt.Tooltip("operation:N", title="Operation"),
-            alt.Tooltip("sequence:Q", title="Seq"),
-            alt.Tooltip("machine:N", title="Machine"),
-            alt.Tooltip("start:T", title="Start"),
-            alt.Tooltip("end:T", title="End"),
-            alt.Tooltip("due_date:T", title="Due"),
-            alt.Tooltip("wheel_type:N", title="Wheel"),
-        ],
-    )
-
-    labels = base.mark_text(
-        align="left", dx=6, baseline="middle", fontSize=10, color="white"
-    ).encode(
-        text="order_id:N",
-        opacity=alt.condition(order_sel, alt.value(1.0), alt.value(0.7)),
-    )
-
-    gantt = (
-        alt.layer(bars, labels)
+    bars = (
+        alt.Chart(sched)
+        .mark_bar(cornerRadius=3)
+        .encode(
+            x=alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
+            x2="end:T",
+            y=alt.Y("machine:N", title=None, sort=y_machines_sorted),
+            color=alt.Color("wheel_type:N", legend=None),
+            opacity=alt.condition(order_sel, alt.value(1.0), alt.value(0.35)),
+            tooltip=[
+                alt.Tooltip("order_id:N", title="Order"),
+                alt.Tooltip("operation:N", title="Operation"),
+                alt.Tooltip("sequence:Q", title="Seq"),
+                alt.Tooltip("machine:N", title="Machine"),
+                alt.Tooltip("start:T", title="Start"),
+                alt.Tooltip("end:T", title="End"),
+                alt.Tooltip("due_date:T", title="Due"),
+                alt.Tooltip("wheel_type:N", title="Wheel"),
+            ],
+        )
         .add_params(order_sel)
         .properties(height=520)
         .configure_view(stroke=None)
     )
 
-    # Ask Streamlit to return the named selection on click (requires recent Streamlit)
+    # IMPORTANT: single-view chart here — selection events are supported.
     event = st.altair_chart(
-        gantt,
+        bars,
         use_container_width=True,
         key="gantt_altair",
         on_select="rerun",          # rerun app when a selection occurs
-        selection_mode="order_sel", # only track this selection
+        selection_mode="order_sel", # only track this named selection
     )
 
     # Read selection and update st.session_state.selected_orders
-    # (Streamlit 1.45+ returns a small object with .selection holding named selections)
     try:
         sel = getattr(event, "selection", {}) or {}
         point = sel.get("order_sel")
@@ -610,11 +599,27 @@ else:
                     cur = cur[-2:]
                 st.session_state.selected_orders = cur
                 st.rerun()
-    except Exception as e:
-        # If your Streamlit is older and doesn't return selection, no crash—just no click-capture
-        st.caption("Altair selection events not available in this Streamlit build.")
-        # Uncomment this to debug the object shape:
-        # st.write(repr(event))
+    except Exception:
+        # If your Streamlit build doesn't return selection yet, the chart still works visually.
+        # Upgrade to streamlit>=1.45.0 to enable Python-side selection events.
+        pass
+
+    # OPTIONAL: If you want labels, render a SECOND chart without on_select (no events).
+    # It will appear below the clickable chart.
+    # labels = (
+    #     alt.Chart(sched)
+    #     .mark_text(align="left", dx=6, baseline="middle", fontSize=10, color="white")
+    #     .encode(
+    #         x=alt.X("start:T", title=None, axis=alt.Axis(format="%a %b %d")),
+    #         x2="end:T",
+    #         y=alt.Y("machine:N", title=None, sort=y_machines_sorted),
+    #         text="order_id:N",
+    #     )
+    #     .properties(height=40)
+    #     .configure_view(stroke=None)
+    # )
+    # st.altair_chart(labels, use_container_width=True)
+
 
 # ============================================================================
 # UC3 RESOLVER: fill missing IDs from current selection
