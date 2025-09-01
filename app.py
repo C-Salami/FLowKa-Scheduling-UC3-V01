@@ -1,21 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 Scooter Wheels Scheduler — UC3 (Click-aware + Voice/Text)
-This version prioritizes the UX you asked for:
-- Click the mic to START, click again to STOP (toggle recording).
-- While recording (or not), you can click bars in the Gantt:
-    • One click selects an order (last selected used for delay/advance/move).
-    • Click a different order to make it two selected (used for swap).
-    • Clicking an already-selected order toggles it off.
-- All operations for a selected order are highlighted (not just one segment).
-- Each bar shows the Order ID INSIDE the bar.
-- Voice commands like "delay this order 2 days", "advance this order 1 hour",
-  "swap orders", "move this order to Sep 1 10:00" work with your selection.
+
+What’s new vs UC2:
+- Better-looking, colorful Plotly timeline
+- Click any bar to (de)select an ORDER (not a single operation) — all ops for that order highlight
+- Select 1 order → "delay/advance/move this order" uses it
+- Select 2 orders → "swap orders" uses them (most recent two)
+- Order ID is printed inside every bar
+- Mic is a toggle: click to start recording, click again to stop and apply the spoken command
 
 Notes:
-- Uses Plotly timeline + streamlit-plotly-events for clicks (single chart).
-- OpenAI extraction is optional; regex fallback supports the examples above.
-- The rest of UC2 behaviors (filters, Deepgram, debug panes, etc.) are preserved.
+- Clicks are handled via streamlit-plotly-events (single chart; no double-render bugs)
+- NLP: OpenAI (optional) with robust regex fallback
+- Apply: delay/move/swap with machine repacking
 """
 
 import os
@@ -30,11 +28,12 @@ from dateutil import parser as dtp
 import streamlit as st
 import pandas as pd
 
-# ---- Chart & click events
+# --- Chart & click events (Plotly)
 import plotly.express as px
+from plotly.colors import qualitative as qpal
 from streamlit_plotly_events import plotly_events
 
-# ---- Voice (toggle record)
+# --- Voice (toggle record)
 from streamlit_mic_recorder import mic_recorder
 
 
@@ -146,7 +145,7 @@ st.markdown(f"""
   padding: 18px 0 24px 0;
 }}
 .bottom-inner {{
-  max-width: 980px; margin: 0 auto; padding: 0 24px;
+  max-width: 1100px; margin: 0 auto; padding: 0 24px;
   display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 16px;
 }}
 .transcript-box {{
@@ -235,7 +234,6 @@ UNITS = {
 }
 TENS = {"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90}
 
-
 def words_to_int(s: str) -> Optional[int]:
     s = s.lower().strip().replace("-", " ")
     if s in UNITS: return UNITS[s]
@@ -246,7 +244,6 @@ def words_to_int(s: str) -> Optional[int]:
     if re.fullmatch(r"\d{1,4}", s):
         return int(s)
     return None
-
 
 def normalize_order_name(text: str) -> Optional[str]:
     """Normalize to 'Order N'. Supports spoken numbers and legacy 'O071'."""
@@ -288,7 +285,6 @@ INTENT_SCHEMA = {
     "additionalProperties": False
 }
 
-
 def _parse_duration_chunks(text: str):
     d = {"days":0.0,"hours":0.0,"minutes":0.0}
     def numtok(tok: str):
@@ -308,7 +304,6 @@ def _parse_duration_chunks(text: str):
         elif u.startswith("h"): d["hours"] += n
         else: d["minutes"] += n
     return d
-
 
 def _extract_with_openai(user_text: str):
     from openai import OpenAI
@@ -347,7 +342,6 @@ def _extract_with_openai(user_text: str):
             if norm: data[k] = norm
     data["_source"] = "openai"
     return data
-
 
 def _regex_fallback(user_text: str):
     t = user_text.strip()
@@ -420,7 +414,6 @@ def _regex_fallback(user_text: str):
 
     return {"intent":"unknown","raw":user_text,"_source":"regex"}
 
-
 def extract_intent(user_text: str) -> dict:
     try:
         if os.getenv("OPENAI_API_KEY"):
@@ -431,7 +424,7 @@ def extract_intent(user_text: str) -> dict:
 
 
 # =============================================================================
-# VALIDATE / APPLY  (UC2-compatible, with minor safety checks)
+# VALIDATE / APPLY  (UC2-compatible)
 # =============================================================================
 def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFrame):
     intent = payload.get("intent")
@@ -484,7 +477,6 @@ def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFra
 
     return False, "Invalid payload"
 
-
 def _repack_touched_machines(s: pd.DataFrame, touched_orders):
     machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
     for m in machines:
@@ -499,7 +491,6 @@ def _repack_touched_machines(s: pd.DataFrame, touched_orders):
             last_end = s.at[idx, "end"]
     return s
 
-
 def apply_delay(schedule_df: pd.DataFrame, order_id: str, *, days=0, hours=0, minutes=0) -> pd.DataFrame:
     s = schedule_df.copy()
     delta = timedelta(days=float(days or 0), hours=float(hours or 0), minutes=float(minutes or 0))
@@ -507,7 +498,6 @@ def apply_delay(schedule_df: pd.DataFrame, order_id: str, *, days=0, hours=0, mi
     s.loc[mask, "start"] = s.loc[mask, "start"] + delta
     s.loc[mask, "end"]   = s.loc[mask, "end"]   + delta
     return _repack_touched_machines(s, [order_id])
-
 
 def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt) -> pd.DataFrame:
     s = schedule_df.copy()
@@ -517,7 +507,6 @@ def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt) -> pd.DataFr
     hours   = delta.seconds // 3600
     minutes = (delta.seconds % 3600) // 60
     return apply_delay(s, order_id, days=days, hours=hours, minutes=minutes)
-
 
 def apply_swap(schedule_df: pd.DataFrame, a: str, b: str) -> pd.DataFrame:
     s = schedule_df.copy()
@@ -552,7 +541,7 @@ with st.container():
         if so:
             st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
         else:
-            st.caption("Click an order bar to select (one for delay/move, two for swap).")
+            st.caption("Click an order to select (one for delay/move, two for swap).")
     with cols[2]:
         if so and st.button("Clear selection"):
             st.session_state.selected_orders = []
@@ -560,15 +549,26 @@ with st.container():
 
 
 # =============================================================================
-# PLOTLY GANTT (single chart, labels inside, click events)
+# PLOTLY GANTT (colorful, labels inside, full-order highlight, click events)
 # =============================================================================
+def _color_map_for_orders(order_ids):
+    # Build a big palette and cycle it deterministically for stable colors across reruns
+    palette = (
+        qpal.Alphabet + qpal.Bold + qpal.Safe + qpal.Set3 + qpal.Dark24 + qpal.Pastel
+    )
+    cmap = {}
+    for i, oid in enumerate(order_ids):
+        cmap[oid] = palette[i % len(palette)]
+    return cmap
+
 if sched.empty:
     st.info("No operations match the current filters.")
 else:
-    # We'll render one trace per order (color="order_id") so highlighting affects all ops of that order.
     sched_plot = sched.copy()
+    order_ids_sorted = sorted(sched_plot["order_id"].unique(), key=lambda oid: sched_plot.loc[sched_plot["order_id"]==oid, "start"].min())
+    color_map = _color_map_for_orders(order_ids_sorted)
 
-    # Build figure
+    # Build a single expressive timeline chart
     fig = px.timeline(
         sched_plot,
         x_start="start",
@@ -577,40 +577,67 @@ else:
         color="order_id",
         text="order_id",  # label inside the bar
         hover_data=["order_id","operation","sequence","wheel_type","start","end","due_date"],
-        custom_data=["order_id"],   # we read this in clicks
+        custom_data=["order_id"],  # we read this in clicks
+        color_discrete_map=color_map
+    )
+
+    fig.update_layout(
+        template="plotly_white",
+        height=560,
+        margin=dict(l=12, r=20, t=10, b=10),
+        showlegend=False,
+        xaxis=dict(
+            showgrid=True, gridcolor="rgba(0,0,0,0.08)",
+            tickformat="%a %b %d %H:%M"
+        ),
+        yaxis=dict(showgrid=False),
+        font=dict(size=12),
     )
     fig.update_yaxes(autorange="reversed")
-    fig.update_layout(height=540, margin=dict(l=20, r=20, t=10, b=10), showlegend=False)
 
-    # Labels inside bars
-    fig.update_traces(textposition="inside", insidetextanchor="middle", cliponaxis=False)
+    # Nice-looking bars: inside labels, crisp edges
+    fig.update_traces(
+        textposition="inside",
+        insidetextanchor="middle",
+        marker_line_color="rgba(0,0,0,0.35)",
+        marker_line_width=1,
+        cliponaxis=False,
+        textfont=dict(size=11),
+    )
 
-    # Highlight selection (all operations of the order) by adjusting trace opacity
+    # Highlight selection (all ops of the order) by adjusting trace opacity and stroke
     selected = set(st.session_state.selected_orders)
-    # Plotly Express creates one trace per color category (order_id).
     for tr in fig.data:
         if tr.name in selected:
-            tr.update(opacity=1.0, marker_line_width=2)
+            tr.update(opacity=1.0, marker_line_width=2.8)
         else:
-            tr.update(opacity=0.35, marker_line_width=0)
+            tr.update(opacity=0.28, marker_line_width=1)
 
     # Render with event capture (do NOT call st.plotly_chart again)
     ev = plotly_events(
         fig,
         click_event=True, select_event=False, hover_event=False,
-        key="gantt_events", override_height=540
+        key="gantt_events", override_height=560
     )
 
-    # Update selection from click
+    # Update selection from click (robustly read order from customdata or trace name)
     if ev:
         try:
             last = ev[-1]
-            # In timeline, the clicked point has "customdata": ["Order N"]
-            cdata = last.get("customdata") or []
-            oid = cdata[0] if cdata else None
+            oid = None
+            # First try customdata per point
+            cdata = last.get("customdata")
+            if isinstance(cdata, list) and cdata and isinstance(cdata[0], str):
+                oid = cdata[0]
+            # Fallback: use trace name
+            if not oid:
+                curve = last.get("curveNumber")
+                if isinstance(curve, int) and 0 <= curve < len(fig.data):
+                    oid = fig.data[curve].name
+
             if isinstance(oid, str) and oid.strip():
                 cur = [o for o in st.session_state.selected_orders if o != oid]
-                # toggle behavior: if clicking the same, remove (handled via if not present, append)
+                # toggle: if already selected, clicking removes it; else add it
                 if oid not in st.session_state.selected_orders:
                     cur.append(oid)
                 # cap at 2 for swap (keep most recent two)
@@ -625,7 +652,7 @@ else:
 # =============================================================================
 # UC3 RESOLVER: fill missing IDs from current selection
 # =============================================================================
-def _resolve_selection_defaults(payload: dict, transcript: Optional[str]) -> dict:
+def _resolve_selection_defaults(payload: dict, _transcript: Optional[str]) -> dict:
     sel = st.session_state.selected_orders or []
     latest = sel[-1] if sel else None
     two = sel[-2:] if len(sel) >= 2 else sel
@@ -644,7 +671,6 @@ def _resolve_selection_defaults(payload: dict, transcript: Optional[str]) -> dic
             other = two[0] if two[1] == payload["order_id"] else two[-1]
             if other != payload["order_id"]:
                 payload["order_id_2"] = other
-
     return payload
 
 
@@ -668,7 +694,6 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
         return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
     except Exception:
         raise RuntimeError(f"Deepgram: no transcript in response: {j}")
-
 
 def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
     """Extract → resolve selection → validate → apply, and log outcome."""
@@ -744,7 +769,7 @@ with st.container():
         st.session_state.is_recording = not st.session_state.is_recording
         st.rerun()
 
-    # Recorder widget (it will continuously record until you click Stop; it returns bytes when stopped)
+    # Recorder widget (records until you click Stop; returns bytes when stopped)
     rec = None
     if st.session_state.is_recording:
         rec = mic_recorder(
@@ -764,7 +789,7 @@ with st.container():
     # Quick help
     st.markdown(
         '<div style="white-space:nowrap; font-size:13px; opacity:0.75;">'
-        'Click bars to select (1 for delay/move, 2 for swap). Speak while recording.'
+        'Click an order (1 for delay/move; 2 for swap). Speak while recording, then click Stop.'
         '</div>',
         unsafe_allow_html=True
     )
