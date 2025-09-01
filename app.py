@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Scooter Wheels Scheduler — UC3 (ECharts version)
-- Colorful, smooth Gantt-like timeline using ECharts (via streamlit-echarts)
-- Click to select orders (whole order is highlighted across all operations)
-- Select 1 order -> "delay/advance/move this order"
-- Select 2 orders -> "swap orders"
-- Order ID label is printed inside each bar
-- Mic is a toggle: click to start, click again to stop and apply the spoken command
-- UC2 logic (NLP, validate, apply, filters, debug panes) preserved
+Scooter Wheels Scheduler — UC3 (ECharts version, events fixed)
+- Colorful ECharts timeline with inside labels.
+- Click to select orders (whole order highlighted across all operations).
+- Select 1 order -> delay/advance/move; Select 2 -> swap.
+- Mic is a toggle (start/stop) and voice commands are applied on stop.
+- This build fixes streamlit-echarts events marshalling: events must be plain strings.
 """
 
 import os
@@ -21,6 +19,7 @@ from dateutil import parser as dtp
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 # --- ECharts
 from streamlit_echarts import st_echarts, JsCode
@@ -107,7 +106,7 @@ if "last_extraction" not in st.session_state:
 if "selected_orders" not in st.session_state:
     st.session_state.selected_orders = []  # e.g., ["Order 71", "Order 11"]
 if "last_click_key" not in st.session_state:
-    st.session_state.last_click_key = None  # (order_id, start_ts)
+    st.session_state.last_click_key = None  # (order_id, start_ms)
 
 
 # =============================================================================
@@ -222,12 +221,8 @@ machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine
 # =============================================================================
 # NLP HELPERS (UC2-compatible)
 # =============================================================================
-UNITS = {
-    "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,
-    "six":6,"seven":7,"eight":8,"nine":9,"ten":10,
-    "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
-    "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19
-}
+UNITS = {"zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,
+         "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19}
 TENS = {"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90}
 
 def words_to_int(s: str) -> Optional[int]:
@@ -293,7 +288,7 @@ def _parse_duration_chunks(text: str):
         return float(val) if val is not None else None
     for num, unit in re.findall(r"([\d\.,]+|\b[\w\-]+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
         n = numtok(num)
-        if n is None:
+        if n is None: 
             continue
         u = unit.lower()
         if u.startswith("d"): d["days"] += n
@@ -549,9 +544,8 @@ with st.container():
 # ECHARTS GANTT (custom series with inside labels + selection highlight)
 # =============================================================================
 def _palette():
-    # Nice long palette
     return [
-        "#2E93fA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
+        "#2E93FA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
         "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
         "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
         "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
@@ -564,34 +558,32 @@ def _color_map_for_orders(order_ids):
 if sched.empty:
     st.info("No operations match the current filters.")
 else:
-    # Prepare machines (y-axis categories) & per-op items (custom series data)
+    # Ensure JSON-serializable dtypes
+    sched = sched.copy()
+    for col in ["order_id","operation","machine","wheel_type"]:
+        if col in sched.columns:
+            sched[col] = sched[col].astype(str)
+
     machines = sorted(sched["machine"].unique().tolist())
     m_index = {m: i for i, m in enumerate(machines)}
-
-    # Sort orders by earliest start for stable colors
-    orders_sorted = (
-        sched.groupby("order_id")["start"].min().sort_values().index.tolist()
-    )
+    # Stable order color mapping
+    orders_sorted = sched.groupby("order_id")["start"].min().sort_values().index.tolist()
     cmap = _color_map_for_orders(orders_sorted)
 
-    # Build ECharts data items per operation
-    # Each data item is a dict consumed by renderItem via api.value(index)
-    # We'll store: [start_ms, end_ms, yIndex, order_id, machine, color, selected_flag]
+    def _ts_ms(x) -> int:
+        # safe int milliseconds
+        return int(pd.to_datetime(x).value // 10**6)
+
     selected_set = set(st.session_state.selected_orders)
-
-    def _ts(x):  # JS Date-compatible ms timestamp
-        return int(pd.Timestamp(x).to_datetime64()) // 10**6
-
     data_items = []
     for _, row in sched.iterrows():
-        order_id = row["order_id"]
-        yidx = m_index[row["machine"]]
-        start_ms, end_ms = _ts(row["start"]), _ts(row["end"])
-        clr = cmap.get(order_id, "#888")
+        order_id = str(row["order_id"])
+        yidx = int(m_index[row["machine"]])
+        start_ms, end_ms = int(_ts_ms(row["start"])), int(_ts_ms(row["end"]))
+        clr = str(cmap.get(order_id, "#888"))
         is_sel = 1 if order_id in selected_set else 0
         data_items.append({
-            "value": [start_ms, end_ms, yidx, order_id, row["machine"], clr, is_sel],
-            # help dedupe same clicks: use a composite id
+            "value": [start_ms, end_ms, yidx, order_id, str(row["machine"]), clr, is_sel],
             "idKey": f"{order_id}::{start_ms}",
         })
 
@@ -601,7 +593,6 @@ else:
       const end   = api.value(1);
       const yidx  = api.value(2);
       const oid   = api.value(3);
-      const mach  = api.value(4);
       const color = api.value(5);
       const sel   = api.value(6);
 
@@ -612,7 +603,7 @@ else:
       const rectShape  = echarts.graphic.clipRectByRect({
         x: startCoord[0],
         y: y,
-        width: endCoord[0] - startCoord[0],
+        width: Math.max(2, endCoord[0] - startCoord[0]),
         height: height
       }, {x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height});
 
@@ -620,7 +611,6 @@ else:
 
       const opacity = sel ? 1.0 : 0.28;
       const strokeW = sel ? 2.8 : 1.0;
-      const labelColor = sel ? '#ffffff' : '#ffffff';
 
       return {
         type: 'group',
@@ -634,10 +624,6 @@ else:
               lineWidth: strokeW,
               opacity: opacity,
             },
-            // pass data back on click
-            onclick: function() {
-              // NO-OP: handled via chart-level events in Python
-            }
           },
           {
             type: 'text',
@@ -648,7 +634,7 @@ else:
               textAlign: 'center',
               textVerticalAlign: 'middle',
               fontSize: 11,
-              fill: labelColor,
+              fill: '#ffffff',
               opacity: opacity,
             }
           }
@@ -664,7 +650,9 @@ else:
         "xAxis": {
             "type": "time",
             "axisLine": {"lineStyle": {"color": "rgba(0,0,0,0.35)"}},
-            "axisLabel": {"formatter": JsCode("function (val) {return echarts.format.formatTime('MM-dd HH:mm', val);}")}
+            "axisLabel": {
+                "formatter": JsCode("function (val) {return echarts.format.formatTime('MM-dd HH:mm', val);}")
+            }
         },
         "yAxis": {
             "type": "category",
@@ -683,17 +671,16 @@ else:
         }],
     }
 
-    # ECharts click → return data.value out of the event so Python receives it
+    # NOTE: events must be plain strings, not JsCode()
     events = {
-        "click": JsCode("""
+        "click": """
             function(params) {
-                // params.data contains our data item
-                if (params && params.data && params.data.value) {
+                if (params && params.data) {
                     return { value: params.data.value, idKey: params.data.idKey };
                 }
                 return {};
             }
-        """)
+        """
     }
 
     event = st_echarts(options=options, events=events, height="560px")
@@ -701,20 +688,22 @@ else:
     # Update selection (NO st.rerun here; Streamlit will rerun naturally)
     if event and isinstance(event, dict) and event.get("value"):
         v = event["value"]
-        oid = v[3]
-        click_key = (oid, v[0])  # (order_id, start_ms) to dedupe
-        if click_key != st.session_state.last_click_key:
-            st.session_state.last_click_key = click_key
-            sel = st.session_state.selected_orders
-            if oid in sel:
-                # toggle off
-                sel = [x for x in sel if x != oid]
-            else:
-                sel = sel + [oid]
-                if len(sel) > 2:
-                    sel = sel[-2:]
-            st.session_state.selected_orders = sel
-            # NO forced rerun
+        try:
+            oid = str(v[3])
+            start_ms = int(v[0])
+            click_key = (oid, start_ms)  # dedupe guard
+            if click_key != st.session_state.last_click_key:
+                st.session_state.last_click_key = click_key
+                sel = st.session_state.selected_orders
+                if oid in sel:
+                    sel = [x for x in sel if x != oid]  # toggle off
+                else:
+                    sel = sel + [oid]
+                    if len(sel) > 2:
+                        sel = sel[-2:]
+                st.session_state.selected_orders = sel
+        except Exception:
+            pass
 
 
 # =============================================================================
