@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Scooter Wheels Scheduler — UC3 (ECharts version, events fixed)
-- Colorful ECharts timeline with inside labels.
-- Click to select orders (whole order highlighted across all operations).
-- Select 1 order -> delay/advance/move; Select 2 -> swap.
-- Mic is a toggle (start/stop) and voice commands are applied on stop.
-- This build fixes streamlit-echarts events marshalling: events must be plain strings.
+Scooter Wheels Scheduler — UC3 (Vis.js Timeline version)
+- Beautiful, colorful interactive timeline using Vis.js via streamlit-timeline
+- Click any bar to (de)select an ORDER; all its operations are highlighted
+- Select 1 order -> delay/advance/move; Select 2 -> swap
+- Order ID is displayed inside each bar (HTML content)
+- Mic is a toggle (start/stop), voice commands applied on stop
+- No forced reruns; no flicker/loop
 """
 
 import os
@@ -21,20 +22,20 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# --- ECharts
-from streamlit_echarts import st_echarts, JsCode
+# Vis.js timeline
+from streamlit_timeline import timeline
 
-# --- Voice (toggle record)
+# Voice (toggle)
 from streamlit_mic_recorder import mic_recorder
 
-# --- HTTP for Deepgram
+# HTTP for Deepgram
 import requests
 
 
 # =============================================================================
 # PAGE / KEYS / CONSTANTS
 # =============================================================================
-st.set_page_config(page_title="Scooter Wheels Scheduler — UC3 (ECharts)", layout="wide")
+st.set_page_config(page_title="Scooter Wheels Scheduler — UC3 (Vis Timeline)", layout="wide")
 
 for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
     try:
@@ -50,19 +51,16 @@ TZ = pytz.timezone(DEFAULT_TZ)
 # DATA LOADING (UC2-compatible)
 # =============================================================================
 def _oNNN_to_order(text: str) -> str:
-    """Convert legacy 'O071' -> 'Order 71'."""
     if isinstance(text, str):
         m = re.fullmatch(r"[Oo](\d{1,4})", text.strip())
         if m:
             return f"Order {int(m.group(1))}"
     return text
 
-
 def _normalize_loaded_ids(df: pd.DataFrame, col: str = "order_id") -> pd.DataFrame:
     if col in df.columns:
         df[col] = df[col].apply(_oNNN_to_order)
     return df
-
 
 @st.cache_data
 def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -72,14 +70,13 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     sched  = _normalize_loaded_ids(sched,  "order_id")
     return orders, sched
 
-
 orders, base_schedule = load_data()
 if "schedule_df" not in st.session_state:
     st.session_state.schedule_df = base_schedule.copy()
 
 
 # =============================================================================
-# STATE (UC2) + UC3 selection & mic toggle
+# STATE (filters, selection, mic)
 # =============================================================================
 if "filters_open" not in st.session_state:
     st.session_state.filters_open = True
@@ -92,7 +89,7 @@ if "filt_machines" not in st.session_state:
 if "cmd_log" not in st.session_state:
     st.session_state.cmd_log = []
 
-# voice bookkeeping
+# mic & extraction
 if "is_recording" not in st.session_state:
     st.session_state.is_recording = False
 if "last_audio_fp" not in st.session_state:
@@ -100,13 +97,13 @@ if "last_audio_fp" not in st.session_state:
 if "last_transcript" not in st.session_state:
     st.session_state.last_transcript = None
 if "last_extraction" not in st.session_state:
-    st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
+    st.session_state.last_extraction = None
 
-# UC3: chart selection (max 2, newest last), and click dedupe guard
+# selection
 if "selected_orders" not in st.session_state:
-    st.session_state.selected_orders = []  # e.g., ["Order 71", "Order 11"]
-if "last_click_key" not in st.session_state:
-    st.session_state.last_click_key = None  # (order_id, start_ms)
+    st.session_state.selected_orders = []   # max 2
+if "last_clicked_item_id" not in st.session_state:
+    st.session_state.last_clicked_item_id = None
 
 
 # =============================================================================
@@ -116,9 +113,7 @@ sidebar_display = "block" if st.session_state.filters_open else "none"
 st.markdown(f"""
 <style>
 #MainMenu, footer {{ visibility: hidden; }}
-
 [data-testid="stSidebar"] {{ display: {sidebar_display}; }}
-
 .block-container {{ padding-top: 6px; padding-bottom: 200px; }}
 
 .topbar {{
@@ -149,25 +144,30 @@ st.markdown(f"""
   padding: 8px 12px; min-height: 40px;
 }}
 .transcript-box.placeholder {{ color: #999; font-style: italic; }}
+
+/* Vis.js item styling via classes */
+.vis-item.vis-selected, .order-selected {{
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.35) inset !important;
+  filter: saturate(1.2) brightness(1.05);
+}}
+.order-dim {{
+  opacity: 0.35 !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
 
 # =============================================================================
-# TOP BAR
+# TOP BAR + SIDEBAR
 # =============================================================================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
-st.markdown('<div class="title">Scooter Wheels Scheduler — UC3 (ECharts)</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">Scooter Wheels Scheduler — UC3 (Vis Timeline)</div>', unsafe_allow_html=True)
 toggle_label = "Hide Filters" if st.session_state.filters_open else "Show Filters"
 if st.button(toggle_label, key="toggle_filters_btn"):
     st.session_state.filters_open = not st.session_state.filters_open
     st.rerun()
 st.markdown('</div></div>', unsafe_allow_html=True)
 
-
-# =============================================================================
-# SIDEBAR (filters + debug)
-# =============================================================================
 if st.session_state.filters_open:
     with st.sidebar:
         st.header("Filters ⚙️")
@@ -211,15 +211,137 @@ if st.session_state.filters_open:
 
 
 # =============================================================================
-# EFFECTIVE FILTERS
+# FILTERED SLICE
 # =============================================================================
-max_orders = int(st.session_state.filt_max_orders)
-wheel_choice = st.session_state.filt_wheels or sorted(base_schedule["wheel_type"].unique().tolist())
-machine_choice = st.session_state.filt_machines or sorted(base_schedule["machine"].unique().tolist())
+sched_all = st.session_state.schedule_df.copy()
+mask = sched_all["wheel_type"].isin(st.session_state.filt_wheels or sched_all["wheel_type"].unique()) & \
+       sched_all["machine"].isin(st.session_state.filt_machines or sched_all["machine"].unique())
+filtered = sched_all.loc[mask].copy()
+
+order_priority = filtered.groupby("order_id", as_index=False)["start"].min().sort_values("start")
+keep_ids = order_priority["order_id"].head(int(st.session_state.filt_max_orders)).tolist()
+sched = filtered[filtered["order_id"].isin(keep_ids)].copy()
+
+# =============================================================================
+# COLOR MAP (stable per order)
+# =============================================================================
+def _palette():
+    return [
+        "#2E93FA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
+        "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
+        "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
+        "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
+    ]
+
+def color_map(order_ids):
+    pal = _palette()
+    return {oid: pal[i % len(pal)] for i, oid in enumerate(order_ids)}
+
+orders_sorted = sched.groupby("order_id")["start"].min().sort_values().index.tolist()
+cmap = color_map(orders_sorted)
 
 
 # =============================================================================
-# NLP HELPERS (UC2-compatible)
+# SELECTION STRIP
+# =============================================================================
+with st.container():
+    so = st.session_state.selected_orders
+    cols = st.columns([1,4,1])
+    with cols[1]:
+        if so:
+            st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
+        else:
+            st.caption("Click an order to select (one for delay/move, two for swap).")
+    with cols[2]:
+        if so and st.button("Clear selection"):
+            st.session_state.selected_orders = []
+            st.session_state.last_clicked_item_id = None
+            st.rerun()
+
+
+# =============================================================================
+# BUILD Vis.js GROUPS & ITEMS
+# =============================================================================
+# groups = machines
+machines = sorted(sched["machine"].astype(str).unique().tolist())
+groups = [{"id": m, "content": m} for m in machines]
+
+# items = operations (with HTML content showing order id), each item must have id, group, start, end
+# We'll also compute a CSS class for highlight/dim based on selection.
+selected = set(st.session_state.selected_orders)
+
+def item_class(oid: str) -> str:
+    if not selected:
+        return ""  # no dimming by default
+    return "order-selected" if oid in selected else "order-dim"
+
+items = []
+for idx, row in sched.sort_values(["machine", "start", "end"]).iterrows():
+    oid = str(row["order_id"])
+    machine = str(row["machine"])
+    start_iso = pd.to_datetime(row["start"]).isoformat()
+    end_iso   = pd.to_datetime(row["end"]).isoformat()
+    color = cmap.get(oid, "#888")
+
+    # HTML content: colored chip with white order id
+    content_html = f"""
+    <div style="
+        display:inline-block; padding:2px 6px; border-radius:6px;
+        background:{color}; color:#fff; font-size:12px; font-weight:600;">
+        {oid}
+    </div>
+    """
+
+    items.append({
+        "id": f"{oid}::{start_iso}",
+        "group": machine,
+        "start": start_iso,
+        "end": end_iso,
+        "content": content_html,
+        "title": f"{oid} • {machine} • {row.get('operation','')}",
+        "className": item_class(oid),
+    })
+
+# Vis options
+options = {
+    "stack": False,
+    "horizontalScroll": True,
+    "zoomKey": "ctrlKey",
+    "maxHeight": "560px",
+    "minHeight": "560px",
+    "margin": {"item": 8, "axis": 12},
+    "orientation": {"axis": "top"},
+    "timeAxis": {"scale": "minute", "step": 30},
+    "showMajorLabels": True,
+    "showCurrentTime": False,
+}
+
+# Render timeline & capture selected item ids (returns a dict with 'id' on click)
+if items:
+    evt = timeline(items=items, groups=groups, options=options, height=600)
+else:
+    st.info("No operations match the current filters.")
+    evt = None
+
+# Update selection (no forced rerun)
+if evt and isinstance(evt, dict) and "id" in evt and evt["id"]:
+    item_id = evt["id"]                # "Order N::2025-08-31T10:00:00"
+    oid = item_id.split("::", 1)[0]
+    if item_id != st.session_state.last_clicked_item_id:
+        st.session_state.last_clicked_item_id = item_id
+        sel = st.session_state.selected_orders
+        if oid in sel:
+            sel = [x for x in sel if x != oid]      # toggle off
+        else:
+            sel = sel + [oid]
+            if len(sel) > 2:
+                sel = sel[-2:]
+        st.session_state.selected_orders = sel
+        # No st.rerun(); Streamlit will rerun naturally on interaction
+
+
+# =============================================================================
+# NLP + APPLY (UC2-compatible)
 # =============================================================================
 UNITS = {"zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,
          "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19}
@@ -237,7 +359,6 @@ def words_to_int(s: str) -> Optional[int]:
     return None
 
 def normalize_order_name(text: str) -> Optional[str]:
-    """Normalize to 'Order N'. Supports spoken numbers and legacy 'O071'."""
     if not isinstance(text, str):
         return None
     legacy = re.search(r"\bO(\d{1,4})\b", text, flags=re.I)
@@ -254,10 +375,6 @@ def normalize_order_name(text: str) -> Optional[str]:
             n = int(digits[-1])
     return f"Order {n}" if n is not None else None
 
-
-# =============================================================================
-# INTENT (OpenAI optional + regex fallback) — UC2-compatible
-# =============================================================================
 INTENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -302,17 +419,13 @@ def _extract_with_openai(user_text: str):
         raise RuntimeError("OPENAI_API_KEY not set")
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     SYSTEM = (
-        "You normalize factory scheduling edit commands for a Gantt. "
-        "Return ONLY JSON matching the given schema. "
-        "Supported intents: delay_order, move_order, swap_orders. "
-        "Order IDs are of the form 'Order N'. "
-        "Convert relative dates to Asia/Makassar. Default move time 08:00. "
-        "If delay units missing, assume days; minutes allowed. "
-        "Accept 'order five' -> 'Order 5', and legacy 'O071' -> 'Order 71'."
+        "Normalize factory scheduling edit commands. Return ONLY JSON per schema. "
+        "Intents: delay_order, move_order, swap_orders. Order IDs like 'Order N'. "
+        "Timezone Asia/Makassar. Default move time 08:00. Minutes allowed."
     )
     GUIDE = (
         '1) "delay order five one day" -> {"intent":"delay_order","order_id":"Order 5","days":1}\n'
-        '2) "push order 9 by 1h 30m" -> {"intent":"delay_order","order_id":"Order 9","hours":1.0,"minutes":30.0}\n'
+        '2) "push order 9 by 1h 30m" -> {"intent":"delay_order","order_id":"Order 9","hours":1,"minutes":30}\n'
         '3) "move order twelve to Aug 30 09:13" -> {"intent":"move_order","order_id":"Order 12","date":"2025-08-30","time":"09:13"}\n'
         '4) "swap order 2 with order 3" -> {"intent":"swap_orders","order_id":"Order 2","order_id_2":"Order 3"}\n'
         '5) "advance order 8 by two days" -> {"intent":"delay_order","order_id":"Order 8","days":-2}\n'
@@ -328,7 +441,7 @@ def _extract_with_openai(user_text: str):
     text = resp.output[0].content[0].text
     data = json.loads(text)
     for k in ("order_id", "order_id_2"):
-        if k in data and isinstance(data[k], str):
+        if k in data and isinstance(k, str):
             norm = normalize_order_name(data[k])
             if norm: data[k] = norm
     data["_source"] = "openai"
@@ -415,7 +528,7 @@ def extract_intent(user_text: str) -> dict:
 
 
 # =============================================================================
-# VALIDATE / APPLY  (UC2-compatible)
+# VALIDATE / APPLY (schedule editing)
 # =============================================================================
 def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFrame):
     intent = payload.get("intent")
@@ -510,204 +623,7 @@ def apply_swap(schedule_df: pd.DataFrame, a: str, b: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# DATA SLICE FOR CHART
-# =============================================================================
-sched_all = st.session_state.schedule_df.copy()
-mask = sched_all["wheel_type"].isin(wheel_choice) & sched_all["machine"].isin(machine_choice)
-filtered = sched_all.loc[mask].copy()
-
-# keep first N orders by earliest start (for readability)
-order_priority = filtered.groupby("order_id", as_index=False)["start"].min().sort_values("start")
-keep_ids = order_priority["order_id"].head(max_orders).tolist()
-sched = filtered[filtered["order_id"].isin(keep_ids)].copy()
-
-
-# =============================================================================
-# SELECTION STRIP
-# =============================================================================
-with st.container():
-    so = st.session_state.selected_orders
-    cols = st.columns([1,4,1])
-    with cols[1]:
-        if so:
-            st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
-        else:
-            st.caption("Click an order to select (one for delay/move, two for swap).")
-    with cols[2]:
-        if so and st.button("Clear selection"):
-            st.session_state.selected_orders = []
-            st.session_state.last_click_key = None
-            st.rerun()
-
-
-# =============================================================================
-# ECHARTS GANTT (custom series with inside labels + selection highlight)
-# =============================================================================
-def _palette():
-    return [
-        "#2E93FA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
-        "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
-        "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
-        "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
-    ]
-
-def _color_map_for_orders(order_ids):
-    pal = _palette()
-    return {oid: pal[i % len(pal)] for i, oid in enumerate(order_ids)}
-
-if sched.empty:
-    st.info("No operations match the current filters.")
-else:
-    # Ensure JSON-serializable dtypes
-    sched = sched.copy()
-    for col in ["order_id","operation","machine","wheel_type"]:
-        if col in sched.columns:
-            sched[col] = sched[col].astype(str)
-
-    machines = sorted(sched["machine"].unique().tolist())
-    m_index = {m: i for i, m in enumerate(machines)}
-    # Stable order color mapping
-    orders_sorted = sched.groupby("order_id")["start"].min().sort_values().index.tolist()
-    cmap = _color_map_for_orders(orders_sorted)
-
-    def _ts_ms(x) -> int:
-        # safe int milliseconds
-        return int(pd.to_datetime(x).value // 10**6)
-
-    selected_set = set(st.session_state.selected_orders)
-    data_items = []
-    for _, row in sched.iterrows():
-        order_id = str(row["order_id"])
-        yidx = int(m_index[row["machine"]])
-        start_ms, end_ms = int(_ts_ms(row["start"])), int(_ts_ms(row["end"]))
-        clr = str(cmap.get(order_id, "#888"))
-        is_sel = 1 if order_id in selected_set else 0
-        data_items.append({
-            "value": [start_ms, end_ms, yidx, order_id, str(row["machine"]), clr, is_sel],
-            "idKey": f"{order_id}::{start_ms}",
-        })
-
-    render_item = JsCode("""
-    function(params, api) {
-      const start = api.value(0);
-      const end   = api.value(1);
-      const yidx  = api.value(2);
-      const oid   = api.value(3);
-      const color = api.value(5);
-      const sel   = api.value(6);
-
-      const startCoord = api.coord([start, yidx]);
-      const endCoord   = api.coord([end,   yidx]);
-      const height     = api.size([0, 1])[1] * 0.7;  // row height
-      const y          = startCoord[1] - height/2;
-      const rectShape  = echarts.graphic.clipRectByRect({
-        x: startCoord[0],
-        y: y,
-        width: Math.max(2, endCoord[0] - startCoord[0]),
-        height: height
-      }, {x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height});
-
-      if (!rectShape) return;
-
-      const opacity = sel ? 1.0 : 0.28;
-      const strokeW = sel ? 2.8 : 1.0;
-
-      return {
-        type: 'group',
-        children: [
-          {
-            type: 'rect',
-            shape: rectShape,
-            style: {
-              fill: color,
-              stroke: 'rgba(0,0,0,0.35)',
-              lineWidth: strokeW,
-              opacity: opacity,
-            },
-          },
-          {
-            type: 'text',
-            style: {
-              x: startCoord[0] + (endCoord[0] - startCoord[0]) / 2,
-              y: y + height/2 + 1,
-              text: oid,
-              textAlign: 'center',
-              textVerticalAlign: 'middle',
-              fontSize: 11,
-              fill: '#ffffff',
-              opacity: opacity,
-            }
-          }
-        ]
-      };
-    }
-    """)
-
-    options = {
-        "animation": True,
-        "tooltip": {"trigger": "item"},
-        "grid": {"left": 8, "right": 16, "top": 8, "bottom": 8, "containLabel": True},
-        "xAxis": {
-            "type": "time",
-            "axisLine": {"lineStyle": {"color": "rgba(0,0,0,0.35)"}},
-            "axisLabel": {
-                "formatter": JsCode("function (val) {return echarts.format.formatTime('MM-dd HH:mm', val);}")
-            }
-        },
-        "yAxis": {
-            "type": "category",
-            "data": machines,
-            "axisTick": {"show": False},
-            "axisLine": {"lineStyle": {"color": "rgba(0,0,0,0.22)"}},
-        },
-        "series": [{
-            "type": "custom",
-            "name": "schedule",
-            "renderItem": render_item,
-            "encode": {"x": [0, 1], "y": 2},
-            "data": data_items,
-            "silent": False,
-            "z": 10,
-        }],
-    }
-
-    # NOTE: events must be plain strings, not JsCode()
-    events = {
-        "click": """
-            function(params) {
-                if (params && params.data) {
-                    return { value: params.data.value, idKey: params.data.idKey };
-                }
-                return {};
-            }
-        """
-    }
-
-    event = st_echarts(options=options, events=events, height="560px")
-
-    # Update selection (NO st.rerun here; Streamlit will rerun naturally)
-    if event and isinstance(event, dict) and event.get("value"):
-        v = event["value"]
-        try:
-            oid = str(v[3])
-            start_ms = int(v[0])
-            click_key = (oid, start_ms)  # dedupe guard
-            if click_key != st.session_state.last_click_key:
-                st.session_state.last_click_key = click_key
-                sel = st.session_state.selected_orders
-                if oid in sel:
-                    sel = [x for x in sel if x != oid]  # toggle off
-                else:
-                    sel = sel + [oid]
-                    if len(sel) > 2:
-                        sel = sel[-2:]
-                st.session_state.selected_orders = sel
-        except Exception:
-            pass
-
-
-# =============================================================================
-# UC3 RESOLVER: fill missing IDs from current selection
+# RESOLVE SELECTION FOR PARTIAL COMMANDS
 # =============================================================================
 def _resolve_selection_defaults(payload: dict, _transcript: Optional[str]) -> dict:
     sel = st.session_state.selected_orders or []
@@ -732,7 +648,7 @@ def _resolve_selection_defaults(payload: dict, _transcript: Optional[str]) -> di
 
 
 # =============================================================================
-# DEEPGRAM (toggle record) — START click, STOP click
+# DEEPGRAM (toggle record) — START/STOP
 # =============================================================================
 def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") -> str:
     key = os.getenv("DEEPGRAM_API_KEY")
@@ -746,7 +662,6 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
     return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
 
 def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
-    """Extract → resolve selection → validate → apply, and log outcome."""
     from copy import deepcopy
     try:
         payload = extract_intent(cmd_text)
@@ -808,45 +723,38 @@ def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
 
 
 # =============================================================================
-# BOTTOM MIC AREA (toggle recording)
+# BOTTOM MIC AREA (toggle)
 # =============================================================================
 with st.container():
     st.markdown('<div class="bottom-wrap"><div class="bottom-inner">', unsafe_allow_html=True)
 
-    # Toggle recording button
     btn_label = "🛑 Stop" if st.session_state.is_recording else "🎙️ Start"
     if st.button(btn_label, key="toggle_mic_btn"):
         st.session_state.is_recording = not st.session_state.is_recording
         st.rerun()
 
-    # Recorder widget (records until Stop; returns bytes once on stop)
     rec = None
     if st.session_state.is_recording:
         rec = mic_recorder(
             start_prompt="", stop_prompt="",
             key="mic_toggle",
-            just_once=False,  # toggle
-            format="wav",
-            use_container_width=False
+            just_once=False, format="wav",
         )
 
-    # Transcript box
     if st.session_state.last_transcript:
         st.markdown(f'<div class="transcript-box">{st.session_state.last_transcript}</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="transcript-box placeholder">(your transcript will appear here)</div>', unsafe_allow_html=True)
 
-    # Quick help
     st.markdown(
         '<div style="white-space:nowrap; font-size:13px; opacity:0.75;">'
         'Click orders to select (1 for delay/move; 2 for swap). Speak while recording, then click Stop.'
         '</div>',
         unsafe_allow_html=True
     )
-
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-# When you click Stop, mic_recorder returns the audio bytes once.
+# On Stop -> bytes arrive once
 if rec and isinstance(rec, dict) and rec.get("bytes"):
     wav_bytes = rec["bytes"]
     fp = (len(wav_bytes), hash(wav_bytes[:1024]))
