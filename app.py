@@ -1,19 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Scooter Wheels Scheduler — UC3 (Click-aware + Voice/Text)
-
-What’s new vs UC2:
-- Better-looking, colorful Plotly timeline
-- Click any bar to (de)select an ORDER (not a single operation) — all ops for that order highlight
-- Select 1 order → "delay/advance/move this order" uses it
-- Select 2 orders → "swap orders" uses them (most recent two)
-- Order ID is printed inside every bar
-- Mic is a toggle: click to start recording, click again to stop and apply the spoken command
-
-Notes:
-- Clicks are handled via streamlit-plotly-events (single chart; no double-render bugs)
-- NLP: OpenAI (optional) with robust regex fallback
-- Apply: delay/move/swap with machine repacking
+Scooter Wheels Scheduler — UC3 (ECharts version)
+- Colorful, smooth Gantt-like timeline using ECharts (via streamlit-echarts)
+- Click to select orders (whole order is highlighted across all operations)
+- Select 1 order -> "delay/advance/move this order"
+- Select 2 orders -> "swap orders"
+- Order ID label is printed inside each bar
+- Mic is a toggle: click to start, click again to stop and apply the spoken command
+- UC2 logic (NLP, validate, apply, filters, debug panes) preserved
 """
 
 import os
@@ -28,21 +22,21 @@ from dateutil import parser as dtp
 import streamlit as st
 import pandas as pd
 
-# --- Chart & click events (Plotly)
-import plotly.express as px
-from plotly.colors import qualitative as qpal
-from streamlit_plotly_events import plotly_events
+# --- ECharts
+from streamlit_echarts import st_echarts, JsCode
 
 # --- Voice (toggle record)
 from streamlit_mic_recorder import mic_recorder
+
+# --- HTTP for Deepgram
+import requests
 
 
 # =============================================================================
 # PAGE / KEYS / CONSTANTS
 # =============================================================================
-st.set_page_config(page_title="Scooter Wheels Scheduler — UC3", layout="wide")
+st.set_page_config(page_title="Scooter Wheels Scheduler — UC3 (ECharts)", layout="wide")
 
-# Pull keys from Streamlit secrets if present
 for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
     try:
         os.environ[k] = os.environ.get(k) or st.secrets[k]  # type: ignore[attr-defined]
@@ -54,7 +48,7 @@ TZ = pytz.timezone(DEFAULT_TZ)
 
 
 # =============================================================================
-# DATA LOADING  (compatible with UC2 structure)
+# DATA LOADING (UC2-compatible)
 # =============================================================================
 def _oNNN_to_order(text: str) -> str:
     """Convert legacy 'O071' -> 'Order 71'."""
@@ -109,9 +103,11 @@ if "last_transcript" not in st.session_state:
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None  # {"raw": "...", "payload": {...}, "source": "..."}
 
-# UC3: chart selection (max 2, newest last)
+# UC3: chart selection (max 2, newest last), and click dedupe guard
 if "selected_orders" not in st.session_state:
     st.session_state.selected_orders = []  # e.g., ["Order 71", "Order 11"]
+if "last_click_key" not in st.session_state:
+    st.session_state.last_click_key = None  # (order_id, start_ts)
 
 
 # =============================================================================
@@ -162,7 +158,7 @@ st.markdown(f"""
 # TOP BAR
 # =============================================================================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
-st.markdown('<div class="title">Scooter Wheels Scheduler — UC3</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">Scooter Wheels Scheduler — UC3 (ECharts)</div>', unsafe_allow_html=True)
 toggle_label = "Hide Filters" if st.session_state.filters_open else "Show Filters"
 if st.button(toggle_label, key="toggle_filters_btn"):
     st.session_state.filters_open = not st.session_state.filters_open
@@ -297,7 +293,7 @@ def _parse_duration_chunks(text: str):
         return float(val) if val is not None else None
     for num, unit in re.findall(r"([\d\.,]+|\b[\w\-]+\b)\s*(days?|d|hours?|h|minutes?|mins?|m)\b", text, flags=re.I):
         n = numtok(num)
-        if n is None: 
+        if n is None:
             continue
         u = unit.lower()
         if u.startswith("d"): d["days"] += n
@@ -532,7 +528,7 @@ sched = filtered[filtered["order_id"].isin(keep_ids)].copy()
 
 
 # =============================================================================
-# SELECTION STRIP (shows current selections)
+# SELECTION STRIP
 # =============================================================================
 with st.container():
     so = st.session_state.selected_orders
@@ -545,108 +541,180 @@ with st.container():
     with cols[2]:
         if so and st.button("Clear selection"):
             st.session_state.selected_orders = []
+            st.session_state.last_click_key = None
             st.rerun()
 
 
 # =============================================================================
-# PLOTLY GANTT (colorful, labels inside, full-order highlight, click events)
+# ECHARTS GANTT (custom series with inside labels + selection highlight)
 # =============================================================================
+def _palette():
+    # Nice long palette
+    return [
+        "#2E93fA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
+        "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
+        "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
+        "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
+    ]
+
 def _color_map_for_orders(order_ids):
-    # Build a big palette and cycle it deterministically for stable colors across reruns
-    palette = (
-        qpal.Alphabet + qpal.Bold + qpal.Safe + qpal.Set3 + qpal.Dark24 + qpal.Pastel
-    )
-    cmap = {}
-    for i, oid in enumerate(order_ids):
-        cmap[oid] = palette[i % len(palette)]
-    return cmap
+    pal = _palette()
+    return {oid: pal[i % len(pal)] for i, oid in enumerate(order_ids)}
 
 if sched.empty:
     st.info("No operations match the current filters.")
 else:
-    sched_plot = sched.copy()
-    order_ids_sorted = sorted(sched_plot["order_id"].unique(), key=lambda oid: sched_plot.loc[sched_plot["order_id"]==oid, "start"].min())
-    color_map = _color_map_for_orders(order_ids_sorted)
+    # Prepare machines (y-axis categories) & per-op items (custom series data)
+    machines = sorted(sched["machine"].unique().tolist())
+    m_index = {m: i for i, m in enumerate(machines)}
 
-    # Build a single expressive timeline chart
-    fig = px.timeline(
-        sched_plot,
-        x_start="start",
-        x_end="end",
-        y="machine",
-        color="order_id",
-        text="order_id",  # label inside the bar
-        hover_data=["order_id","operation","sequence","wheel_type","start","end","due_date"],
-        custom_data=["order_id"],  # we read this in clicks
-        color_discrete_map=color_map
+    # Sort orders by earliest start for stable colors
+    orders_sorted = (
+        sched.groupby("order_id")["start"].min().sort_values().index.tolist()
     )
+    cmap = _color_map_for_orders(orders_sorted)
 
-    fig.update_layout(
-        template="plotly_white",
-        height=560,
-        margin=dict(l=12, r=20, t=10, b=10),
-        showlegend=False,
-        xaxis=dict(
-            showgrid=True, gridcolor="rgba(0,0,0,0.08)",
-            tickformat="%a %b %d %H:%M"
-        ),
-        yaxis=dict(showgrid=False),
-        font=dict(size=12),
-    )
-    fig.update_yaxes(autorange="reversed")
+    # Build ECharts data items per operation
+    # Each data item is a dict consumed by renderItem via api.value(index)
+    # We'll store: [start_ms, end_ms, yIndex, order_id, machine, color, selected_flag]
+    selected_set = set(st.session_state.selected_orders)
 
-    # Nice-looking bars: inside labels, crisp edges
-    fig.update_traces(
-        textposition="inside",
-        insidetextanchor="middle",
-        marker_line_color="rgba(0,0,0,0.35)",
-        marker_line_width=1,
-        cliponaxis=False,
-        textfont=dict(size=11),
-    )
+    def _ts(x):  # JS Date-compatible ms timestamp
+        return int(pd.Timestamp(x).to_datetime64()) // 10**6
 
-    # Highlight selection (all ops of the order) by adjusting trace opacity and stroke
-    selected = set(st.session_state.selected_orders)
-    for tr in fig.data:
-        if tr.name in selected:
-            tr.update(opacity=1.0, marker_line_width=2.8)
-        else:
-            tr.update(opacity=0.28, marker_line_width=1)
+    data_items = []
+    for _, row in sched.iterrows():
+        order_id = row["order_id"]
+        yidx = m_index[row["machine"]]
+        start_ms, end_ms = _ts(row["start"]), _ts(row["end"])
+        clr = cmap.get(order_id, "#888")
+        is_sel = 1 if order_id in selected_set else 0
+        data_items.append({
+            "value": [start_ms, end_ms, yidx, order_id, row["machine"], clr, is_sel],
+            # help dedupe same clicks: use a composite id
+            "idKey": f"{order_id}::{start_ms}",
+        })
 
-    # Render with event capture (do NOT call st.plotly_chart again)
-    ev = plotly_events(
-        fig,
-        click_event=True, select_event=False, hover_event=False,
-        key="gantt_events", override_height=560
-    )
+    render_item = JsCode("""
+    function(params, api) {
+      const start = api.value(0);
+      const end   = api.value(1);
+      const yidx  = api.value(2);
+      const oid   = api.value(3);
+      const mach  = api.value(4);
+      const color = api.value(5);
+      const sel   = api.value(6);
 
-    # Update selection from click (robustly read order from customdata or trace name)
-    if ev:
-        try:
-            last = ev[-1]
-            oid = None
-            # First try customdata per point
-            cdata = last.get("customdata")
-            if isinstance(cdata, list) and cdata and isinstance(cdata[0], str):
-                oid = cdata[0]
-            # Fallback: use trace name
-            if not oid:
-                curve = last.get("curveNumber")
-                if isinstance(curve, int) and 0 <= curve < len(fig.data):
-                    oid = fig.data[curve].name
+      const startCoord = api.coord([start, yidx]);
+      const endCoord   = api.coord([end,   yidx]);
+      const height     = api.size([0, 1])[1] * 0.7;  // row height
+      const y          = startCoord[1] - height/2;
+      const rectShape  = echarts.graphic.clipRectByRect({
+        x: startCoord[0],
+        y: y,
+        width: endCoord[0] - startCoord[0],
+        height: height
+      }, {x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height});
 
-            if isinstance(oid, str) and oid.strip():
-                cur = [o for o in st.session_state.selected_orders if o != oid]
-                # toggle: if already selected, clicking removes it; else add it
-                if oid not in st.session_state.selected_orders:
-                    cur.append(oid)
-                # cap at 2 for swap (keep most recent two)
-                if len(cur) > 2:
-                    cur = cur[-2:]
-                st.session_state.selected_orders = cur
-                st.rerun()
-        except Exception as e:
-            st.warning(f"Click selection error: {e}")
+      if (!rectShape) return;
+
+      const opacity = sel ? 1.0 : 0.28;
+      const strokeW = sel ? 2.8 : 1.0;
+      const labelColor = sel ? '#ffffff' : '#ffffff';
+
+      return {
+        type: 'group',
+        children: [
+          {
+            type: 'rect',
+            shape: rectShape,
+            style: {
+              fill: color,
+              stroke: 'rgba(0,0,0,0.35)',
+              lineWidth: strokeW,
+              opacity: opacity,
+            },
+            // pass data back on click
+            onclick: function() {
+              // NO-OP: handled via chart-level events in Python
+            }
+          },
+          {
+            type: 'text',
+            style: {
+              x: startCoord[0] + (endCoord[0] - startCoord[0]) / 2,
+              y: y + height/2 + 1,
+              text: oid,
+              textAlign: 'center',
+              textVerticalAlign: 'middle',
+              fontSize: 11,
+              fill: labelColor,
+              opacity: opacity,
+            }
+          }
+        ]
+      };
+    }
+    """)
+
+    options = {
+        "animation": True,
+        "tooltip": {"trigger": "item"},
+        "grid": {"left": 8, "right": 16, "top": 8, "bottom": 8, "containLabel": True},
+        "xAxis": {
+            "type": "time",
+            "axisLine": {"lineStyle": {"color": "rgba(0,0,0,0.35)"}},
+            "axisLabel": {"formatter": JsCode("function (val) {return echarts.format.formatTime('MM-dd HH:mm', val);}")}
+        },
+        "yAxis": {
+            "type": "category",
+            "data": machines,
+            "axisTick": {"show": False},
+            "axisLine": {"lineStyle": {"color": "rgba(0,0,0,0.22)"}},
+        },
+        "series": [{
+            "type": "custom",
+            "name": "schedule",
+            "renderItem": render_item,
+            "encode": {"x": [0, 1], "y": 2},
+            "data": data_items,
+            "silent": False,
+            "z": 10,
+        }],
+    }
+
+    # ECharts click → return data.value out of the event so Python receives it
+    events = {
+        "click": JsCode("""
+            function(params) {
+                // params.data contains our data item
+                if (params && params.data && params.data.value) {
+                    return { value: params.data.value, idKey: params.data.idKey };
+                }
+                return {};
+            }
+        """)
+    }
+
+    event = st_echarts(options=options, events=events, height="560px")
+
+    # Update selection (NO st.rerun here; Streamlit will rerun naturally)
+    if event and isinstance(event, dict) and event.get("value"):
+        v = event["value"]
+        oid = v[3]
+        click_key = (oid, v[0])  # (order_id, start_ms) to dedupe
+        if click_key != st.session_state.last_click_key:
+            st.session_state.last_click_key = click_key
+            sel = st.session_state.selected_orders
+            if oid in sel:
+                # toggle off
+                sel = [x for x in sel if x != oid]
+            else:
+                sel = sel + [oid]
+                if len(sel) > 2:
+                    sel = sel[-2:]
+            st.session_state.selected_orders = sel
+            # NO forced rerun
 
 
 # =============================================================================
@@ -681,19 +749,12 @@ def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") ->
     key = os.getenv("DEEPGRAM_API_KEY")
     if not key:
         raise RuntimeError("DEEPGRAM_API_KEY not set")
-    import requests
     url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=en"
     headers = {"Authorization": f"Token {key}", "Content-Type": mimetype}
     r = requests.post(url, headers=headers, data=wav_bytes, timeout=45)
-    try:
-        r.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"Deepgram error: {r.text}") from e
+    r.raise_for_status()
     j = r.json()
-    try:
-        return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
-    except Exception:
-        raise RuntimeError(f"Deepgram: no transcript in response: {j}")
+    return j["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
 
 def _process_and_apply(cmd_text: str, *, source_hint: Optional[str] = None):
     """Extract → resolve selection → validate → apply, and log outcome."""
@@ -769,13 +830,13 @@ with st.container():
         st.session_state.is_recording = not st.session_state.is_recording
         st.rerun()
 
-    # Recorder widget (records until you click Stop; returns bytes when stopped)
+    # Recorder widget (records until Stop; returns bytes once on stop)
     rec = None
     if st.session_state.is_recording:
         rec = mic_recorder(
             start_prompt="", stop_prompt="",
             key="mic_toggle",
-            just_once=False,  # allow toggling
+            just_once=False,  # toggle
             format="wav",
             use_container_width=False
         )
@@ -789,7 +850,7 @@ with st.container():
     # Quick help
     st.markdown(
         '<div style="white-space:nowrap; font-size:13px; opacity:0.75;">'
-        'Click an order (1 for delay/move; 2 for swap). Speak while recording, then click Stop.'
+        'Click orders to select (1 for delay/move; 2 for swap). Speak while recording, then click Stop.'
         '</div>',
         unsafe_allow_html=True
     )
