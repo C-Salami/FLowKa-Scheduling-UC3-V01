@@ -1,9 +1,10 @@
-streamlit==1.45.0     # (or newer) to enable Altair selection events via on_select
+streamlit==1.37.1
 pandas==2.2.2
 numpy==1.26.4
-altair==5.3.0
 python-dateutil==2.9.0.post0
 pytz==2024.1
 requests>=2.31.0
-openai>=1.40.0        # if you’re using the OpenAI intent path
+openai>=1.40.0           # optional, if using OpenAI extraction
 streamlit-mic-recorder==0.0.8
+plotly==5.24.1
+streamlit-plotly-events>=0.0.6
