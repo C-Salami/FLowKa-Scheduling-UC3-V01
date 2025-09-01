@@ -1,20 +1,9 @@
-streamlit-echarts==0.4.0
-streamlit-mic-recorder==0.0.8
-pandas==2.2.2
-numpy==1.26.4
-python-dateutil==2.9.0.post0
-pytz==2024.1
-requests>=2.31.0
-openai>=1.40.0   # optional: only if you use OpenAI intent extraction
-streamlit==1.37.1  # or newer; 1.45+ also fine
-
 streamlit==1.37.1
-streamlit-echarts==0.4.0
+streamlit-timeline==0.0.2
 streamlit-mic-recorder==0.0.8
 pandas==2.2.2
 numpy==1.26.4
 python-dateutil==2.9.0.post0
 pytz==2024.1
 requests>=2.31.0
-openai>=1.40.0   # optional
-
+openai>=1.40.0          # optional, if you want LLM intent extraction
