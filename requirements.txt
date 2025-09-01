@@ -2,14 +2,13 @@ streamlit==1.37.1
 pandas==2.2.2
 numpy==1.26.4
 altair==5.3.0
-plotly==5.24.1
+
 python-dateutil==2.9.0.post0
 pytz==2024.1
 openai>=1.40.0
 streamlit-audiorec
 requests>=2.31.0
 streamlit-mic-recorder
-streamlit-plotly-events>=0.0.6
 
 
 
