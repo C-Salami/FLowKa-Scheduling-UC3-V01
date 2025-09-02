@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Scooter Wheels Scheduler — UC3 (Vis.js Timeline version)
-- Beautiful, colorful interactive timeline using Vis.js via streamlit-timeline
-- Click any bar to (de)select an ORDER; all its operations are highlighted
+Scooter Wheels Scheduler — UC3 (Plotly + streamlit-plotly-events)
+- Colorful Gantt with inside order labels
+- Click any bar to (de)select an ORDER; all its operations highlight
 - Select 1 order -> delay/advance/move; Select 2 -> swap
-- Order ID is displayed inside each bar (HTML content)
-- Mic is a toggle (start/stop), voice commands applied on stop
-- No forced reruns; no flicker/loop
+- Mic is a toggle (start/stop). On stop we transcribe and apply the command.
+- No forced reruns on chart clicks; only after schedule edits
 """
 
 import os
@@ -22,10 +21,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# Vis.js timeline
-# RIGHT
-
-from streamlit_vis_timeline import st_timeline
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from streamlit_plotly_events import plotly_events
 
 # Voice (toggle)
 from streamlit_mic_recorder import mic_recorder
@@ -35,9 +33,9 @@ import requests
 
 
 # =============================================================================
-# PAGE / KEYS / CONSTANTS
+# PAGE / ENV
 # =============================================================================
-st.set_page_config(page_title="Scooter Wheels Scheduler — UC3 (Vis Timeline)", layout="wide")
+st.set_page_config(page_title="Scooter Wheels Scheduler — UC3", layout="wide")
 
 for k in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY"):
     try:
@@ -50,7 +48,7 @@ TZ = pytz.timezone(DEFAULT_TZ)
 
 
 # =============================================================================
-# DATA LOADING (UC2-compatible)
+# DATA
 # =============================================================================
 def _oNNN_to_order(text: str) -> str:
     if isinstance(text, str):
@@ -77,39 +75,8 @@ if "schedule_df" not in st.session_state:
     st.session_state.schedule_df = base_schedule.copy()
 
 
-# this is the latest add from the chatgpt###
-
-selected_raw = st_timeline(items, groups=groups, options=options, height=600)
-
-# Normalize selection to a single int id (or None)
-selected_id = None
-if isinstance(selected_raw, int):
-    selected_id = selected_raw
-elif isinstance(selected_raw, list):
-    selected_id = selected_raw[0] if selected_raw else None
-elif isinstance(selected_raw, dict):
-    if "id" in selected_raw and isinstance(selected_raw["id"], int):
-        selected_id = selected_raw["id"]
-    elif "selection" in selected_raw and selected_raw["selection"]:
-        selected_id = selected_raw["selection"][0]
-
-if isinstance(selected_id, int) and selected_id in st.session_state.get("_id_to_oid", {}):
-    oid = st.session_state["_id_to_oid"][selected_id]
-    if st.session_state.get("last_clicked_item_id") != selected_id:
-        st.session_state["last_clicked_item_id"] = selected_id
-        sel = st.session_state.selected_orders
-        if oid in sel:
-            sel = [x for x in sel if x != oid]
-        else:
-            sel = sel + [oid]
-            if len(sel) > 2:
-                sel = sel[-2:]
-        st.session_state.selected_orders = sel
-        # no st.rerun() here
-
-
 # =============================================================================
-# STATE (filters, selection, mic)
+# STATE
 # =============================================================================
 if "filters_open" not in st.session_state:
     st.session_state.filters_open = True
@@ -132,21 +99,22 @@ if "last_transcript" not in st.session_state:
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None
 
-# selection
+# chart selection (order-level)
 if "selected_orders" not in st.session_state:
-    st.session_state.selected_orders = []   # max 2
-if "last_clicked_item_id" not in st.session_state:
-    st.session_state.last_clicked_item_id = None
+    st.session_state.selected_orders = []  # cap 2
+if "last_click_key" not in st.session_state:
+    st.session_state.last_click_key = None  # (order_id, start_iso)
 
 
 # =============================================================================
-# CSS / LAYOUT
+# STYLES
 # =============================================================================
 sidebar_display = "block" if st.session_state.filters_open else "none"
 st.markdown(f"""
 <style>
 #MainMenu, footer {{ visibility: hidden; }}
 [data-testid="stSidebar"] {{ display: {sidebar_display}; }}
+
 .block-container {{ padding-top: 6px; padding-bottom: 200px; }}
 
 .topbar {{
@@ -177,24 +145,15 @@ st.markdown(f"""
   padding: 8px 12px; min-height: 40px;
 }}
 .transcript-box.placeholder {{ color: #999; font-style: italic; }}
-
-/* Vis.js item styling via classes */
-.vis-item.vis-selected, .order-selected {{
-  box-shadow: 0 0 0 2px rgba(0,0,0,0.35) inset !important;
-  filter: saturate(1.2) brightness(1.05);
-}}
-.order-dim {{
-  opacity: 0.35 !important;
-}}
 </style>
 """, unsafe_allow_html=True)
 
 
 # =============================================================================
-# TOP BAR + SIDEBAR
+# TOP BAR / SIDEBAR
 # =============================================================================
 st.markdown('<div class="topbar"><div class="inner">', unsafe_allow_html=True)
-st.markdown('<div class="title">Scooter Wheels Scheduler — UC3 (Vis Timeline)</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">Scooter Wheels Scheduler — UC3</div>', unsafe_allow_html=True)
 toggle_label = "Hide Filters" if st.session_state.filters_open else "Show Filters"
 if st.button(toggle_label, key="toggle_filters_btn"):
     st.session_state.filters_open = not st.session_state.filters_open
@@ -244,7 +203,7 @@ if st.session_state.filters_open:
 
 
 # =============================================================================
-# FILTERED SLICE
+# FILTER SLICE
 # =============================================================================
 sched_all = st.session_state.schedule_df.copy()
 mask = sched_all["wheel_type"].isin(st.session_state.filt_wheels or sched_all["wheel_type"].unique()) & \
@@ -255,155 +214,9 @@ order_priority = filtered.groupby("order_id", as_index=False)["start"].min().sor
 keep_ids = order_priority["order_id"].head(int(st.session_state.filt_max_orders)).tolist()
 sched = filtered[filtered["order_id"].isin(keep_ids)].copy()
 
-# =============================================================================
-# COLOR MAP (stable per order)
-# =============================================================================
-def _palette():
-    return [
-        "#2E93FA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
-        "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
-        "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
-        "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
-    ]
-
-def color_map(order_ids):
-    pal = _palette()
-    return {oid: pal[i % len(pal)] for i, oid in enumerate(order_ids)}
-
-orders_sorted = sched.groupby("order_id")["start"].min().sort_values().index.tolist()
-cmap = color_map(orders_sorted)
-
 
 # =============================================================================
-# SELECTION STRIP
-# =============================================================================
-with st.container():
-    so = st.session_state.selected_orders
-    cols = st.columns([1,4,1])
-    with cols[1]:
-        if so:
-            st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
-        else:
-            st.caption("Click an order to select (one for delay/move, two for swap).")
-    with cols[2]:
-        if so and st.button("Clear selection"):
-            st.session_state.selected_orders = []
-            st.session_state.last_clicked_item_id = None
-            st.rerun()
-
-
-# =============================================================================
-# BUILD Vis.js GROUPS & ITEMS  (using streamlit-vis-timeline)
-# =============================================================================
-# groups = machines
-machines = sorted(sched["machine"].astype(str).unique().tolist())
-groups = [{"id": i, "content": m} for i, m in enumerate(machines)]
-group_index = {m: i for i, m in enumerate(machines)}
-
-# Keep stable colors per order
-def _palette():
-    return [
-        "#2E93FA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
-        "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
-        "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
-        "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
-    ]
-
-def color_map(order_ids):
-    pal = _palette()
-    return {oid: pal[i % len(pal)] for i, oid in enumerate(order_ids)}
-
-orders_sorted = sched.groupby("order_id")["start"].min().sort_values().index.tolist()
-cmap = color_map(orders_sorted)
-
-# Selection classes
-selected = set(st.session_state.selected_orders)
-def item_class(oid: str) -> str:
-    if not selected:
-        return ""  # no dim
-    return "order-selected" if oid in selected else "order-dim"
-
-# Build items; streamlit-vis-timeline prefers numeric IDs
-items = []
-id_to_oid = {}
-counter = 1
-
-for _, row in sched.sort_values(["machine", "start", "end"]).iterrows():
-    oid = str(row["order_id"])
-    gid = int(group_index[str(row["machine"])])
-    start_iso = pd.to_datetime(row["start"]).isoformat()
-    end_iso   = pd.to_datetime(row["end"]).isoformat()
-    color = cmap.get(oid, "#888")
-
-    # HTML content (inside label)
-    content_html = f"""
-    <div style="
-        display:inline-block; padding:2px 6px; border-radius:6px;
-        background:{color}; color:#fff; font-size:12px; font-weight:600;">
-        {oid}
-    </div>
-    """
-
-    item_id = int(counter); counter += 1
-    id_to_oid[item_id] = oid
-
-    items.append({
-        "id": item_id,
-        "group": gid,
-        "start": start_iso,
-        "end": end_iso,
-        "content": content_html,
-        "title": f"{oid} • {row.get('machine','')} • {row.get('operation','')}",
-        "className": item_class(oid),
-    })
-
-# Persist mapping for click handling
-st.session_state["_id_to_oid"] = id_to_oid
-
-# Vis.js options
-options = {
-    "stack": False,
-    "horizontalScroll": True,
-    "zoomKey": "ctrlKey",
-    "maxHeight": "560px",
-    "minHeight": "560px",
-    "margin": {"item": 8, "axis": 12},
-    "orientation": {"axis": "top"},
-    "showCurrentTime": False,
-    "multiselect": False,  # single item per click; we aggregate by order across items
-}
-
-# Render and read selection
-if items:
-    # st_timeline returns the selected item ID (int) or list/None depending on multiselect
-    selected_id = st_timeline(items, groups=groups, options=options, height=600)
-else:
-    st.info("No operations match the current filters.")
-    selected_id = None
-
-# Normalize selected value to an int or None
-if isinstance(selected_id, list):
-    selected_id = selected_id[0] if selected_id else None
-
-# Update selection (toggle order; cap 2)
-if isinstance(selected_id, int) and selected_id in st.session_state.get("_id_to_oid", {}):
-    oid = st.session_state["_id_to_oid"][selected_id]
-    # dedupe against last clicked raw item id if you like:
-    if st.session_state.get("last_clicked_item_id") != selected_id:
-        st.session_state["last_clicked_item_id"] = selected_id
-        sel = st.session_state.selected_orders
-        if oid in sel:
-            sel = [x for x in sel if x != oid]  # toggle off
-        else:
-            sel = sel + [oid]
-            if len(sel) > 2:
-                sel = sel[-2:]
-        st.session_state.selected_orders = sel
-        # no st.rerun() needed
-
-
-# =============================================================================
-# NLP + APPLY (UC2-compatible)
+# INTENT HELPERS
 # =============================================================================
 UNITS = {"zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,
          "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19}
@@ -503,7 +316,7 @@ def _extract_with_openai(user_text: str):
     text = resp.output[0].content[0].text
     data = json.loads(text)
     for k in ("order_id", "order_id_2"):
-        if k in data and isinstance(k, str):
+        if k in data and isinstance(data[k], str):
             norm = normalize_order_name(data[k])
             if norm: data[k] = norm
     data["_source"] = "openai"
@@ -574,7 +387,6 @@ def _regex_fallback(user_text: str):
             except Exception:
                 pass
 
-    # Fallback "one day"
     if target and re.search(r"\b(delay|push|postpone)\b.*\bone day\b", low):
         return {"intent":"delay_order","order_id":target,"days":1,"_source":"regex"}
 
@@ -590,8 +402,48 @@ def extract_intent(user_text: str) -> dict:
 
 
 # =============================================================================
-# VALIDATE / APPLY (schedule editing)
+# APPLY
 # =============================================================================
+def _repack_touched_machines(s: pd.DataFrame, touched_orders):
+    machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
+    for m in machines:
+        block_idx = s.index[s["machine"] == m]
+        block = s.loc[block_idx].sort_values(["start", "end"]).copy()
+        last_end = None
+        for idx, row in block.iterrows():
+            if last_end is not None and row["start"] < last_end:
+                dur = row["end"] - row["start"]
+                s.at[idx, "start"] = last_end
+                s.at[idx, "end"] = last_end + dur
+            last_end = s.at[idx, "end"]
+    return s
+
+def apply_delay(schedule_df: pd.DataFrame, order_id: str, *, days=0, hours=0, minutes=0) -> pd.DataFrame:
+    s = schedule_df.copy()
+    delta = timedelta(days=float(days or 0), hours=float(hours or 0), minutes=float(minutes or 0))
+    mask = s["order_id"] == order_id
+    s.loc[mask, "start"] = s.loc[mask, "start"] + delta
+    s.loc[mask, "end"]   = s.loc[mask, "end"]   + delta
+    return _repack_touched_machines(s, [order_id])
+
+def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt) -> pd.DataFrame:
+    s = schedule_df.copy()
+    t0 = s.loc[s["order_id"] == order_id, "start"].min()
+    delta = target_dt - t0
+    days    = delta.days
+    hours   = delta.seconds // 3600
+    minutes = (delta.seconds % 3600) // 60
+    return apply_delay(s, order_id, days=days, hours=hours, minutes=minutes)
+
+def apply_swap(schedule_df: pd.DataFrame, a: str, b: str) -> pd.DataFrame:
+    s = schedule_df.copy()
+    a0 = s.loc[s["order_id"] == a, "start"].min()
+    b0 = s.loc[s["order_id"] == b, "start"].min()
+    da, db = (b0 - a0), (a0 - b0)
+    s = apply_delay(s, a, days=da.days, hours=da.seconds // 3600, minutes=(da.seconds % 3600)//60)
+    s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600, minutes=(db.seconds % 3600)//60)
+    return s
+
 def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFrame):
     intent = payload.get("intent")
 
@@ -643,49 +495,150 @@ def validate_intent(payload: dict, orders_df: pd.DataFrame, sched_df: pd.DataFra
 
     return False, "Invalid payload"
 
-def _repack_touched_machines(s: pd.DataFrame, touched_orders):
-    machines = s.loc[s["order_id"].isin(touched_orders), "machine"].unique().tolist()
+
+# =============================================================================
+# BUILD GANTT (Plotly) + CLICK EVENTS
+# =============================================================================
+def _palette():
+    return [
+        "#2E93FA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
+        "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
+        "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
+        "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
+    ]
+
+def color_map(order_ids):
+    pal = _palette()
+    return {oid: pal[i % len(pal)] for i, oid in enumerate(order_ids)}
+
+if sched.empty:
+    st.info("No operations match the current filters.")
+else:
+    # Stable order colors by earliest start
+    orders_sorted = sched.groupby("order_id")["start"].min().sort_values().index.tolist()
+    cmap = color_map(orders_sorted)
+
+    # Row categories = machines
+    machines = sorted(sched["machine"].astype(str).unique().tolist())
+
+    # Create one trace per machine to keep y categorical & clickable bars
+    fig = make_subplots(rows=1, cols=1)
+
+    selected = set(st.session_state.selected_orders)
+
     for m in machines:
-        block_idx = s.index[s["machine"] == m]
-        block = s.loc[block_idx].sort_values(["start", "end"]).copy()
-        last_end = None
+        block = sched[sched["machine"].astype(str) == m].sort_values(["start", "end"]).copy()
+        if block.empty:
+            continue
+
+        # For each op build a bar (as a Scatter with base+width via shapes is messy; we use Bar with x ranges)
+        # Plotly Gantt approach: we can use go.Bar with base=start and width=duration on x time axis with y=m category.
+        x_base = block["start"]
+        width = (block["end"] - block["start"]).dt.total_seconds() * 1000.0  # ms just for tooltip calc
+        text = block["order_id"].astype(str)
+        order_colors = block["order_id"].map(cmap).fillna("#888").tolist()
+        opacity = [1.0 if oid in selected or not selected else 0.28 for oid in block["order_id"]]
+
+        # We use a bar for each row but plotly's bar time-width needs numeric; workaround with bar charts:
+        # Instead, we use scatter with mode='markers' and custom shapes overlay for rectangles:
+        # To keep clicks simple, we use bar with x=end-start as width AND x anchored using 'base'.
+        # Plotly supports 'base' for bar traces in v5 (for horizontal bars). For vertical time bars, we can use shapes.
+        # Simpler: use go.Scatter with 'open'/'close' via segment? Not clickable per-rect.
+        # Robust solution: add each op as a separate go.Bar (wide, thin categories):
         for idx, row in block.iterrows():
-            if last_end is not None and row["start"] < last_end:
-                dur = row["end"] - row["start"]
-                s.at[idx, "start"] = last_end
-                s.at[idx, "end"] = last_end + dur
-            last_end = s.at[idx, "end"]
-    return s
+            oid = str(row["order_id"])
+            color = cmap.get(oid, "#888")
+            is_sel = (oid in selected) or (not selected)
+            fig.add_trace(go.Bar(
+                x=[(row["end"] - row["start"]).total_seconds()/3600.0],  # duration in hours
+                y=[m],
+                base=[row["start"]],
+                orientation='h',
+                marker=dict(
+                    color=color,
+                    line=dict(color="rgba(0,0,0,0.35)", width=2 if oid in selected else 1)
+                ),
+                opacity=1.0 if is_sel else 0.28,
+                hovertemplate=(
+                    f"<b>{oid}</b><br>" +
+                    "Machine: %{y}<br>" +
+                    "Start: %{base|%Y-%m-%d %H:%M}<br>" +
+                    "End: %{x|%Y-%m-%d %H:%M}<extra></extra>"
+                ),
+                # Put the order id as text inside the bar
+                text=[oid],
+                textposition="inside",
+                insidetextanchor="middle",
+                textfont=dict(color="white", size=11),
+                name=oid,
+                customdata=[[oid, pd.to_datetime(row["start"]).isoformat()]],
+                showlegend=False
+            ))
 
-def apply_delay(schedule_df: pd.DataFrame, order_id: str, *, days=0, hours=0, minutes=0) -> pd.DataFrame:
-    s = schedule_df.copy()
-    delta = timedelta(days=float(days or 0), hours=float(hours or 0), minutes=float(minutes or 0))
-    mask = s["order_id"] == order_id
-    s.loc[mask, "start"] = s.loc[mask, "start"] + delta
-    s.loc[mask, "end"]   = s.loc[mask, "end"]   + delta
-    return _repack_touched_machines(s, [order_id])
+    fig.update_layout(
+        barmode='overlay',
+        bargap=0.2,
+        height=560,
+        margin=dict(l=20, r=20, t=10, b=10),
+        xaxis=dict(
+            title="Time",
+            type="date",
+            tickformat="%m-%d %H:%M",
+            showgrid=True
+        ),
+        yaxis=dict(
+            title="Machine",
+            categoryorder="array",
+            categoryarray=machines
+        ),
+    )
 
-def apply_move(schedule_df: pd.DataFrame, order_id: str, target_dt) -> pd.DataFrame:
-    s = schedule_df.copy()
-    t0 = s.loc[s["order_id"] == order_id, "start"].min()
-    delta = target_dt - t0
-    days    = delta.days
-    hours   = delta.seconds // 3600
-    minutes = (delta.seconds % 3600) // 60
-    return apply_delay(s, order_id, days=days, hours=hours, minutes=minutes)
+    # Capture click events (returns list of points)
+    events = plotly_events(
+        fig,
+        click_event=True, hover_event=False, select_event=False,
+        override_height=560, override_width="100%"
+    )
 
-def apply_swap(schedule_df: pd.DataFrame, a: str, b: str) -> pd.DataFrame:
-    s = schedule_df.copy()
-    a0 = s.loc[s["order_id"] == a, "start"].min()
-    b0 = s.loc[s["order_id"] == b, "start"].min()
-    da, db = (b0 - a0), (a0 - b0)
-    s = apply_delay(s, a, days=da.days, hours=da.seconds // 3600, minutes=(da.seconds % 3600)//60)
-    s = apply_delay(s, b, days=db.days, hours=db.seconds // 3600, minutes=(db.seconds % 3600)//60)
-    return s
+    # Handle selection (dedupe; no st.rerun here)
+    if events:
+        pt = events[-1]
+        # our customdata is [order_id, start_iso]
+        if "customdata" in pt and pt["customdata"]:
+            oid, start_iso = pt["customdata"]
+            click_key = (oid, start_iso)
+            if click_key != st.session_state.last_click_key:
+                st.session_state.last_click_key = click_key
+                sel = st.session_state.selected_orders
+                if oid in sel:
+                    sel = [x for x in sel if x != oid]
+                else:
+                    sel = sel + [oid]
+                    if len(sel) > 2:
+                        sel = sel[-2:]
+                st.session_state.selected_orders = sel
 
 
 # =============================================================================
-# RESOLVE SELECTION FOR PARTIAL COMMANDS
+# SELECTION STRIP
+# =============================================================================
+with st.container():
+    so = st.session_state.selected_orders
+    cols = st.columns([1,4,1])
+    with cols[1]:
+        if so:
+            st.markdown("🟩 **Selected**: " + "  •  ".join(f"`{o}`" for o in so))
+        else:
+            st.caption("Click an order bar to select (one for delay/move, two for swap).")
+    with cols[2]:
+        if so and st.button("Clear selection"):
+            st.session_state.selected_orders = []
+            st.session_state.last_click_key = None
+            st.rerun()
+
+
+# =============================================================================
+# RESOLVE SELECTION DEFAULTS
 # =============================================================================
 def _resolve_selection_defaults(payload: dict, _transcript: Optional[str]) -> dict:
     sel = st.session_state.selected_orders or []
@@ -710,7 +663,7 @@ def _resolve_selection_defaults(payload: dict, _transcript: Optional[str]) -> di
 
 
 # =============================================================================
-# DEEPGRAM (toggle record) — START/STOP
+# DEEPGRAM (toggle) — start/stop
 # =============================================================================
 def _deepgram_transcribe_bytes(wav_bytes: bytes, mimetype: str = "audio/wav") -> str:
     key = os.getenv("DEEPGRAM_API_KEY")
