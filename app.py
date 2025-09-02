@@ -23,7 +23,9 @@ import pandas as pd
 import numpy as np
 
 # Vis.js timeline
-from streamlit_vis_timeline import st_timeline
+# RIGHT
+from streamlit_timeline import st_timeline
+
 
 # Voice (toggle)
 from streamlit_mic_recorder import mic_recorder
