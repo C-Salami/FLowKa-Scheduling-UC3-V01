@@ -1,11 +1,9 @@
-
 streamlit==1.37.1
-streamlit-vis-timeline==0.3.1
+streamlit-vis-timeline==0.3.0
 streamlit-mic-recorder==0.0.8
 pandas==2.2.2
 numpy==1.26.4
 python-dateutil==2.9.0.post0
 pytz==2024.1
 requests>=2.31.0
-openai>=1.40.0   # optional
-
+openai>=1.40.0
