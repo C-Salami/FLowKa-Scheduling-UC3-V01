@@ -23,7 +23,7 @@ import pandas as pd
 import numpy as np
 
 # Vis.js timeline
-from streamlit_timeline import timeline
+from streamlit_vis_timeline import st_timeline
 
 # Voice (toggle)
 from streamlit_mic_recorder import mic_recorder
@@ -260,30 +260,49 @@ with st.container():
 
 
 # =============================================================================
-# BUILD Vis.js GROUPS & ITEMS
+# BUILD Vis.js GROUPS & ITEMS  (using streamlit-vis-timeline)
 # =============================================================================
 # groups = machines
 machines = sorted(sched["machine"].astype(str).unique().tolist())
-groups = [{"id": m, "content": m} for m in machines]
+groups = [{"id": i, "content": m} for i, m in enumerate(machines)]
+group_index = {m: i for i, m in enumerate(machines)}
 
-# items = operations (with HTML content showing order id), each item must have id, group, start, end
-# We'll also compute a CSS class for highlight/dim based on selection.
+# Keep stable colors per order
+def _palette():
+    return [
+        "#2E93FA","#66DA26","#546E7A","#E91E63","#FF9800","#00E396","#775DD0","#F9A3A4",
+        "#F86624","#1B998B","#2E294E","#F46036","#5BC0EB","#9C27B0","#00B8D9","#36B37E",
+        "#FF6F61","#4C78A8","#F58518","#54A24B","#EECA3B","#B279A2","#FF9DA6","#9CC8C4",
+        "#E45756","#F2B701","#54A24B","#4C78A8","#72B7B2","#B279A2","#F58518","#E6E6E6",
+    ]
+
+def color_map(order_ids):
+    pal = _palette()
+    return {oid: pal[i % len(pal)] for i, oid in enumerate(order_ids)}
+
+orders_sorted = sched.groupby("order_id")["start"].min().sort_values().index.tolist()
+cmap = color_map(orders_sorted)
+
+# Selection classes
 selected = set(st.session_state.selected_orders)
-
 def item_class(oid: str) -> str:
     if not selected:
-        return ""  # no dimming by default
+        return ""  # no dim
     return "order-selected" if oid in selected else "order-dim"
 
+# Build items; streamlit-vis-timeline prefers numeric IDs
 items = []
-for idx, row in sched.sort_values(["machine", "start", "end"]).iterrows():
+id_to_oid = {}
+counter = 1
+
+for _, row in sched.sort_values(["machine", "start", "end"]).iterrows():
     oid = str(row["order_id"])
-    machine = str(row["machine"])
+    gid = int(group_index[str(row["machine"])])
     start_iso = pd.to_datetime(row["start"]).isoformat()
     end_iso   = pd.to_datetime(row["end"]).isoformat()
     color = cmap.get(oid, "#888")
 
-    # HTML content: colored chip with white order id
+    # HTML content (inside label)
     content_html = f"""
     <div style="
         display:inline-block; padding:2px 6px; border-radius:6px;
@@ -292,17 +311,23 @@ for idx, row in sched.sort_values(["machine", "start", "end"]).iterrows():
     </div>
     """
 
+    item_id = int(counter); counter += 1
+    id_to_oid[item_id] = oid
+
     items.append({
-        "id": f"{oid}::{start_iso}",
-        "group": machine,
+        "id": item_id,
+        "group": gid,
         "start": start_iso,
         "end": end_iso,
         "content": content_html,
-        "title": f"{oid} • {machine} • {row.get('operation','')}",
+        "title": f"{oid} • {row.get('machine','')} • {row.get('operation','')}",
         "className": item_class(oid),
     })
 
-# Vis options
+# Persist mapping for click handling
+st.session_state["_id_to_oid"] = id_to_oid
+
+# Vis.js options
 options = {
     "stack": False,
     "horizontalScroll": True,
@@ -311,33 +336,37 @@ options = {
     "minHeight": "560px",
     "margin": {"item": 8, "axis": 12},
     "orientation": {"axis": "top"},
-    "timeAxis": {"scale": "minute", "step": 30},
-    "showMajorLabels": True,
     "showCurrentTime": False,
+    "multiselect": False,  # single item per click; we aggregate by order across items
 }
 
-# Render timeline & capture selected item ids (returns a dict with 'id' on click)
+# Render and read selection
 if items:
-    evt = timeline(items=items, groups=groups, options=options, height=600)
+    # st_timeline returns the selected item ID (int) or list/None depending on multiselect
+    selected_id = st_timeline(items, groups=groups, options=options, height=600)
 else:
     st.info("No operations match the current filters.")
-    evt = None
+    selected_id = None
 
-# Update selection (no forced rerun)
-if evt and isinstance(evt, dict) and "id" in evt and evt["id"]:
-    item_id = evt["id"]                # "Order N::2025-08-31T10:00:00"
-    oid = item_id.split("::", 1)[0]
-    if item_id != st.session_state.last_clicked_item_id:
-        st.session_state.last_clicked_item_id = item_id
+# Normalize selected value to an int or None
+if isinstance(selected_id, list):
+    selected_id = selected_id[0] if selected_id else None
+
+# Update selection (toggle order; cap 2)
+if isinstance(selected_id, int) and selected_id in st.session_state.get("_id_to_oid", {}):
+    oid = st.session_state["_id_to_oid"][selected_id]
+    # dedupe against last clicked raw item id if you like:
+    if st.session_state.get("last_clicked_item_id") != selected_id:
+        st.session_state["last_clicked_item_id"] = selected_id
         sel = st.session_state.selected_orders
         if oid in sel:
-            sel = [x for x in sel if x != oid]      # toggle off
+            sel = [x for x in sel if x != oid]  # toggle off
         else:
             sel = sel + [oid]
             if len(sel) > 2:
                 sel = sel[-2:]
         st.session_state.selected_orders = sel
-        # No st.rerun(); Streamlit will rerun naturally on interaction
+        # no st.rerun() needed
 
 
 # =============================================================================
