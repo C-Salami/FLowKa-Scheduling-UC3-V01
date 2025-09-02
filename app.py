@@ -24,8 +24,8 @@ import numpy as np
 
 # Vis.js timeline
 # RIGHT
-from streamlit_timeline import st_timeline
 
+from streamlit_vis_timeline import st_timeline
 
 # Voice (toggle)
 from streamlit_mic_recorder import mic_recorder
@@ -75,6 +75,37 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
 orders, base_schedule = load_data()
 if "schedule_df" not in st.session_state:
     st.session_state.schedule_df = base_schedule.copy()
+
+
+# this is the latest add from the chatgpt###
+
+selected_raw = st_timeline(items, groups=groups, options=options, height=600)
+
+# Normalize selection to a single int id (or None)
+selected_id = None
+if isinstance(selected_raw, int):
+    selected_id = selected_raw
+elif isinstance(selected_raw, list):
+    selected_id = selected_raw[0] if selected_raw else None
+elif isinstance(selected_raw, dict):
+    if "id" in selected_raw and isinstance(selected_raw["id"], int):
+        selected_id = selected_raw["id"]
+    elif "selection" in selected_raw and selected_raw["selection"]:
+        selected_id = selected_raw["selection"][0]
+
+if isinstance(selected_id, int) and selected_id in st.session_state.get("_id_to_oid", {}):
+    oid = st.session_state["_id_to_oid"][selected_id]
+    if st.session_state.get("last_clicked_item_id") != selected_id:
+        st.session_state["last_clicked_item_id"] = selected_id
+        sel = st.session_state.selected_orders
+        if oid in sel:
+            sel = [x for x in sel if x != oid]
+        else:
+            sel = sel + [oid]
+            if len(sel) > 2:
+                sel = sel[-2:]
+        st.session_state.selected_orders = sel
+        # no st.rerun() here
 
 
 # =============================================================================
